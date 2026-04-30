@@ -197,6 +197,11 @@ dim shared MBP_Connection_Failure as integer
 dim shared MBP_Socket_Error as integer
 dim shared MBP_ZeroOffset as integer = 0
 dim shared MBP_UnitID as integer = 255
+dim shared MBP_Port as integer = 502
+declare sub MBTCP_SetPort(byval port as integer)
+sub MBTCP_SetPort(byval port as integer)
+MBP_Port = port
+end sub
 
 dim shared MBP_RecvTimeoutMS as integer = 1000   ' default 1 second
 dim shared MBP_Common_LastError as string
@@ -276,10 +281,10 @@ sub MBTCP_Connect (hostname as string)
         exit sub
     end if
 
-    MBTCP_DBG("Connecting to Host on port 502")
+    MBTCP_DBG("Connecting to Host on port " & MBP_Port)
 
     dim sa as sockaddr_in
-    sa.sin_port        = htons( 502 )
+    sa.sin_port        = htons( MBP_Port )
     sa.sin_family      = AF_INET
     sa.sin_addr.S_addr = ip
 
