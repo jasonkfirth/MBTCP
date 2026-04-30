@@ -147,6 +147,7 @@ function ConnectClientOrFail( byref host as string, byval timeoutMs as integer )
     dim start as double = timer
     MBP_Connection_Failure = 0
 
+    MBTCP_SetPort(HARNESS_PORT)
     do
 
         MBTCP_Connect(host)
