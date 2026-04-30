@@ -1,68 +1,33 @@
-''
-'' simple Modbus TCP wrapper for FreeBASIC, based on the FreeBASIC http-get example
-''
-'' This program provides the ability for a program to communicate with a single
-'' Modbus TCP device.
-''
-'' We're doing things this way to keep the library simple. Limiting communication
-'' to a single PLC at once means we can communicate without having to handle
-'' multiple discussions. Future versions may use some method to handle multiple
-'' communications.
-''
-'' Version 1 12/13/2013
-''
-'' Version 2.0 05Feb2026
-''
-'' Created canonical version of the file to include features and improvements as required.
-''
-'' Added MBP_UnitID for flexibility. On Quantum and M580 PLCs, this is usually 255, but it can be other numbers.
-''
-'' Created a new helper function MBTCP_RecvExact to prevent recv errors
-''
-'' Implemented MBTCP_RecvModbusFrame for future use instead of recv for proper modbus support
-''
-'' fixed a potential bug in coil read and discrete input read regarding undefined bits
-''
-'' fixed a potential bug in the discrete input read where we were pulling the wrong number of bytes.
-''
-'' Added MBTCP_Debug support with byte dump tracing to help diagnose hangs and protocol issues.
-''
-'' Added MBP_Common_LastError to allow meaningful error reporting.
-''
-'' Added socket receive timeout to prevent hangs when PLC ignores a request (strict UnitID mode).
-''
-'' Added address range checking to prevent illegal Modbus address wraparound.
-''
-'' Updated write functions to use MBTCP_RecvModbusFrame() instead of MBTCP_RecvExact()
-'' to ensure all Modbus TCP traffic is framed correctly using MBAP length.
-''
-'' Version 2.1 06Feb2026
-''
-'' Added client support for emulator extended function codes:
-''   FC07 Read Exception Status
-''   FC08 Diagnostics (subset)
-''   FC0B Get Comm Event Counter
-''   FC0C Get Comm Event Log
-''   FC11 Report Server ID
-''   FC17 Read/Write Multiple Registers
-''
-'' Version 2.2 06Feb2026
-''
-'' Added support for:
-''   FC16 Mask Write Register (0x16 / decimal 22)
-''
-'' This is a holding-register write operation that modifies specific bits
-'' without disturbing other bits.
-''
-'' Fixes in 2.2+:
-''   - FC22 MBAP Length corrected (was 10, must be 8: UnitID + PDU)
-''   - FC07 ReadExceptionStatus now returns the STATUS byte (not the bytecount)
-''   - FC11 ReportServerID strips the Run Indicator byte from the returned string
-''
-
+' -------------------------------------------------------------------------
+' Project: FreeBASIC Modbus TCP library
+' -------------------------------------------------------------------------
+'
+' File: modbustcp.bi
+'
+' Purpose:
+'
+'     Modbus TCP Client Library for FreeBASIC.
+'
+' Responsibilities:
+'
+'      - Establishing and managing TCP connections to Modbus devices.
+'      - Encoding Modbus PDUs into MBAP frames.
+'      - Decoding responses and handling Modbus exceptions.
+'      - Providing high-level functions for reading/writing coils and registers.
+'
+' This file intentionally does NOT contain:
+'
+'      - Server-side emulator logic.
+'      - Complex multi-device connection management (one connection at a time).
+'      - GUI or high-level application logic.
+' -------------------------------------------------------------------------
 
 #ifndef __MBTCP_BI__
 #define __MBTCP_BI__
+
+' -------------------------------------------------------------------------
+' External Headers & Platform Compatibility
+' -------------------------------------------------------------------------
 
 #ifdef __FB_WIN32__
     #include once "win/winsock2.bi"
@@ -72,8 +37,16 @@
     #include once "crt/netinet/in.bi"
     #include once "crt/arpa/inet.bi"
     #include once "crt/unistd.bi"
+#ifndef __FB_WIN32__
+    #include once "crt/sys/time.bi"
+    #include once "crt/stdio.bi"
+#endif
 #endif
 
+
+' -------------------------------------------------------------------------
+' Declarations: Initialization & Connection
+' -------------------------------------------------------------------------
 
 declare sub MBTCP_doInit( )
 declare sub MBTCP_doShutdown( )
@@ -91,6 +64,10 @@ declare sub MBTCP_reportError( byref msg as string )
 declare sub MBTCP_Init()
 declare sub MBTCP_Connect (IPAddress as string)
 declare sub MBTCP_Disconnect()
+
+' -------------------------------------------------------------------------
+' Declarations: Data Reception & Validation
+' -------------------------------------------------------------------------
 
 #ifdef __FB_WIN32__
     declare function MBTCP_RecvExact( byval sock as SOCKET, _
@@ -119,9 +96,10 @@ declare sub MBTCP_SetLastError( byref msg as string )
 declare function MBTCP_ValidateAddr16( byval addr as integer, byref what as string ) as integer
 
 
-''
-'' --- Core user-facing Modbus calls ---
-''
+' -------------------------------------------------------------------------
+' Declarations: Core user-facing Modbus calls
+' -------------------------------------------------------------------------
+
 declare function MBTCP_RetrieveCoil (CoilNumber as integer) as integer
 declare function MBTCP_RetrieveDiscreteInput (CoilNumber as integer) as integer
 
@@ -141,9 +119,9 @@ declare function MBTCP_WriteMultipleRegisters (Values() as ushort, StartRegister
 declare function MBTCP_WriteMultipleCoils (Values() as ubyte, StartCoil as integer) as integer
 
 
-''
-'' --- New emulator endpoints (v2.1) ---
-''
+' -------------------------------------------------------------------------
+' Declarations: New emulator endpoints
+' -------------------------------------------------------------------------
 
 type MBTCP_CommEventCounterResult
     status     as ushort
@@ -177,42 +155,22 @@ declare function MBTCP_ReadWriteMultipleRegisters( _
     writeValues() as ushort, _
     outReadValues() as ushort ) as integer
 
-
-''
-'' ------------------------------------------------------------
-'' FC22 (0x16) Mask Write Register
-'' ------------------------------------------------------------
-''
-'' This is a standard Modbus function that allows the client to modify
-'' selected bits of a holding register while leaving the other bits untouched.
-''
-'' FUNCTION CODE:
-''   22 decimal (0x16 hex)
-''
-'' REQUEST:
-''   AddressHi, AddressLo, AndMaskHi, AndMaskLo, OrMaskHi, OrMaskLo
-''
-'' RESPONSE:
-''   Echo of request
-''
 declare function MBTCP_MaskWriteRegister( _
     byval registerNumber as integer, _
     byval andMask as ushort, _
     byval orMask as ushort ) as integer
 
 
-
-' ============================================================
+' -------------------------------------------------------------------------
 ' Error Constants
-' ============================================================
+' -------------------------------------------------------------------------
 
 const MBTCP_COMM_ERROR = -32768
 
 
-
-' ============================================================
+' -------------------------------------------------------------------------
 ' Debug Support
-' ============================================================
+' -------------------------------------------------------------------------
 
 #ifdef MBTCP_Debug
     declare sub MBTCP_DumpBytes( byref label as string, byval p as ubyte ptr, byval n as integer )
@@ -224,10 +182,9 @@ const MBTCP_COMM_ERROR = -32768
 #endif
 
 
-
-' ============================================================
+' -------------------------------------------------------------------------
 ' Global State
-' ============================================================
+' -------------------------------------------------------------------------
 
 #ifdef __FB_WIN32__
     dim shared MBP_Socket as SOCKET
@@ -330,6 +287,7 @@ sub MBTCP_Connect (hostname as string)
         MBTCP_SetLastError("MBTCP_Connect: connect() failed to '" & hostname & ":502'")
         MBTCP_reportError( "MBTCP: connect()" )
         closesocket( MBP_Socket )
+        MBP_Socket = 0
         MBP_Connection_Failure = 1
         exit sub
     end if
@@ -367,9 +325,9 @@ end sub
 
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' MBTCP_RecvExact
-' ============================================================
+' -------------------------------------------------------------------------
 
 #ifdef __FB_WIN32__
 function MBTCP_RecvExact( byval sock as SOCKET, _
@@ -412,9 +370,9 @@ end function
 
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' MBTCP_RecvModbusFrame
-' ============================================================
+' -------------------------------------------------------------------------
 
 #ifdef __FB_WIN32__
 function MBTCP_RecvModbusFrame( byval sock as SOCKET, _
@@ -474,9 +432,9 @@ end function
 
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' MBTCP_CheckFrameCommon
-' ============================================================
+' -------------------------------------------------------------------------
 
 function MBTCP_CheckFrameCommon( _
         frame() as ubyte, _
@@ -525,9 +483,9 @@ end function
 
 
 
-' ============================================================
-' Core Read Functions
-' ============================================================
+' -------------------------------------------------------------------------
+' Implementation: Core user-facing Modbus calls
+' -------------------------------------------------------------------------
 
 function MBTCP_RetrieveDiscreteInput (CoilNumber as integer) as integer
 
@@ -557,6 +515,7 @@ function MBTCP_RetrieveDiscreteInput (CoilNumber as integer) as integer
         MBTCP_SetLastError("MBTCP_RetrieveDiscreteInput: send() failed")
         MBTCP_reportError( " MBTCP_DiscreteInput send()" )
         closesocket( MBP_Socket )
+        MBP_Socket = 0
         MBP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
@@ -621,6 +580,7 @@ function MBTCP_RetrieveCoil (CoilNumber as integer) as integer
         MBTCP_SetLastError("MBTCP_RetrieveCoil: send() failed")
         MBTCP_reportError( " MBTCP_RetrieveCoil send()" )
         closesocket( MBP_Socket )
+        MBP_Socket = 0
         MBP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
@@ -685,6 +645,7 @@ function MBTCP_RetrieveRegister (RegisterNumber as integer) as integer
         MBTCP_SetLastError("MBTCP_RetrieveRegister: send() failed")
         MBTCP_reportError( " MBTCP_RetrieveRegister send()" )
         closesocket( MBP_Socket )
+        MBP_Socket = 0
         MBP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
@@ -749,6 +710,7 @@ function MBTCP_RetrieveInputRegister (RegisterNumber as integer) as integer
         MBTCP_SetLastError("MBTCP_RetrieveInputRegister: send() failed")
         MBTCP_reportError( " MBTCP_RetrieveInputRegister send()" )
         closesocket( MBP_Socket )
+        MBP_Socket = 0
         MBP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
@@ -817,6 +779,7 @@ function MBTCP_RetrieveLongRegister (RegisterNumber as integer) as long
         MBTCP_SetLastError("MBTCP_RetrieveLongRegister: send() failed")
         MBTCP_reportError( " MBTCP_RetrieveLongRegister send()" )
         closesocket( MBP_Socket )
+        MBP_Socket = 0
         MBP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
@@ -875,9 +838,9 @@ end function
 
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' Core Write Functions
-' ============================================================
+' -------------------------------------------------------------------------
 
 function MBTCP_WriteRegister (Value as short, RegisterNumber as integer) as integer
 
@@ -907,6 +870,7 @@ function MBTCP_WriteRegister (Value as short, RegisterNumber as integer) as inte
         MBTCP_SetLastError("MBTCP_WriteRegister: send() failed")
         MBTCP_reportError( " MBTCP_WriteRegister send()" )
         closesocket( MBP_Socket )
+        MBP_Socket = 0
         MBP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
@@ -1023,6 +987,7 @@ function MBTCP_WriteCoil (Value as integer, CoilNumber as integer) as integer
         MBTCP_SetLastError("MBTCP_WriteCoil: send() failed")
         MBTCP_reportError( " MBTCP_WriteCoil send()" )
         closesocket( MBP_Socket )
+        MBP_Socket = 0
         MBP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
@@ -1133,6 +1098,7 @@ function MBTCP_WriteMultipleRegisters (Values() as ushort, StartRegister as inte
         MBTCP_SetLastError("MBTCP_WriteMultipleRegisters: send() failed")
         MBTCP_reportError( " MBTCP_WriteMultipleRegisters send()" )
         closesocket( MBP_Socket )
+        MBP_Socket = 0
         MBP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
@@ -1245,6 +1211,7 @@ function MBTCP_WriteMultipleCoils (Values() as ubyte, StartCoil as integer) as i
         MBTCP_SetLastError("MBTCP_WriteMultipleCoils: send() failed")
         MBTCP_reportError( " MBTCP_WriteMultipleCoils send()" )
         closesocket( MBP_Socket )
+        MBP_Socket = 0
         MBP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
@@ -1276,9 +1243,6 @@ end function
 
 
 
-' ============================================================
-' FC22 Mask Write Register (v2.2)
-' ============================================================
 
 function MBTCP_MaskWriteRegister( _
     byval registerNumber as integer, _
@@ -1299,18 +1263,12 @@ function MBTCP_MaskWriteRegister( _
     MBP_CurrentTransaction += 1
     if MBP_CurrentTransaction > 255 then MBP_CurrentTransaction = 0
 
-    '' MBAP Header (6 bytes) + UnitID + PDU(7 bytes) = 14 total bytes
-    ''
-    '' MBAP length = bytes after MBAP header:
-    ''   UnitID(1) + PDU(7) = 8
-    ''   where PDU = FC(1) + Addr(2) + And(2) + Or(2)
-    ''
     Request(0) = 0
     Request(1) = MBP_CurrentTransaction
     Request(2) = 0
     Request(3) = 0
     Request(4) = 0
-    Request(5) = 8   '' FIX: was 10 (wrong) -> must be 8
+    Request(5) = 8
 
     Request(6) = MBP_UnitID
     Request(7) = 22
@@ -1346,7 +1304,6 @@ function MBTCP_MaskWriteRegister( _
     rc = MBTCP_CheckFrameCommon(frame(), 22, MBP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
-    '' FC22 response is an echo of the request (14 bytes total)
     if bytes <> 14 then
         MBTCP_SetLastError("MBTCP_MaskWriteRegister: expected 14 bytes but got " & bytes)
         return MBTCP_COMM_ERROR
@@ -1382,9 +1339,9 @@ end function
 
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' Emulator extensions (FC07 / FC08 / FC0B / FC0C / FC11 / FC17)
-' ============================================================
+' -------------------------------------------------------------------------
 
 function MBTCP_ReadExceptionStatus() as integer
 
@@ -1421,7 +1378,6 @@ function MBTCP_ReadExceptionStatus() as integer
     rc = MBTCP_CheckFrameCommon(frame(), 7, MBP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
-    '' Emulator/server returns: UnitID, FC07, ByteCount=1, Status
     if bytes < 10 then
         MBTCP_SetLastError("MBTCP_ReadExceptionStatus: response too short")
         return MBTCP_COMM_ERROR
@@ -1432,7 +1388,7 @@ function MBTCP_ReadExceptionStatus() as integer
         return MBTCP_COMM_ERROR
     end if
 
-    return frame(9)   '' FIX: was returning frame(8) (bytecount)
+    return frame(9)
 
 end function
 
@@ -1681,8 +1637,6 @@ function MBTCP_ReportServerID( byref outId as string ) as integer
         return MBTCP_COMM_ERROR
     end if
 
-    '' Spec includes a trailing "Run Indicator Status" byte.
-    '' We return only the ID string part (strip final byte).
     dim idLen as integer
     idLen = byteCount - 1
     if idLen < 0 then idLen = 0
@@ -1851,9 +1805,9 @@ end function
 
 
 
-' ============================================================
-' Support functions
-' ============================================================
+' -------------------------------------------------------------------------
+' Implementation: Resolution & Error Reporting
+' -------------------------------------------------------------------------
 
 sub MBTCP_getHostAndPath _
     ( _
@@ -1928,3 +1882,5 @@ end sub
 
 
 #endif '' __MBTCP_BI__
+
+' end of modbustcp.bi
