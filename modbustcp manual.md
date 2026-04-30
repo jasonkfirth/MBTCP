@@ -30,10 +30,10 @@ This library makes assumptions to reduce the complexity on the user interface:
 
 ### 4.1 Setting up FreeBASIC & FBIDE
 
-1. Download FreeBASIC: http://www.freebasic.net  
-2. Download fbIDE: http://fbide.sourceforge.net  
-3. Install fbIDE  
-4. Install FreeBASIC into the fbIDE directory  
+1. Download FreeBASIC: http://www.freebasic.net
+2. Download fbIDE: http://fbide.sourceforge.net
+3. Install fbIDE
+4. Install FreeBASIC into the fbIDE directory
 
 ---
 

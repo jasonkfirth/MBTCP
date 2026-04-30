@@ -1,80 +1,36 @@
-' ============================================================
-' Modbus TCP Integration / Validation Harness (MBSE <-> MBTCP)
-' ============================================================
+' -------------------------------------------------------------------------
+' Project: FreeBASIC Modbus TCP library
+' -------------------------------------------------------------------------
 '
-' This program is a *validation harness* for the FreeBASIC Modbus TCP
-' library pair:
+' File: validation.bas
 '
-'   - MBSE : Modbus Server Emulator (acts like a PLC / slave device)
-'   - MBTCP: Modbus TCP Client API (acts like SCADA / HMI / Master)
+' Purpose:
 '
-' This harness is designed for two major purposes:
+'     Modbus TCP Integration / Validation Harness (MBSE <-> MBTCP).
+'     Used for regression testing and as educational documentation.
 '
-'   1) Regression Testing
-'      If we modify MBTCP or MBSE, we can re-run this harness and verify
-'      that nothing broke.
+' Responsibilities:
 '
-'   2) Teaching / Trades Documentation
-'      This file is deliberately verbose and educational. It explains
-'      Modbus behaviour in practical terms, so it can be used as a
-'      reference by technicians, apprentices, and integrators.
+'      - Running a background server emulator (MBSE).
+'      - Executing a series of Modbus client (MBTCP) tests.
+'      - Validating protocol correctness, exception handling, and recovery.
+'      - Reporting pass/fail results for each test case.
 '
+' This file intentionally does NOT contain:
 '
-' ============================================================
-' CANON HARNESS BEHAVIOUR
-' ============================================================
-'
-'   - MBSE runs as a threaded Modbus TCP server emulator.
-'   - MBTCP connects as a real TCP client.
-'   - We validate:
-'
-'       * MBTCP client API correctness
-'       * MBSE emulator correctness
-'       * Full integration correctness (socket, framing, parsing)
-'
-'
-' ============================================================
-' IMPORTANT NOTES FOR TECHS
-' ============================================================
-'
-' Modbus TCP uses port 502 by default.
-'
-' On Windows and Linux, binding port 502 often requires administrator
-' privileges because it is a "privileged port".
-'
-' If you get failures starting the server:
-'
-'   - another Modbus program may already be running
-'   - you may not have privileges
-'   - port 502 may be blocked by firewall
-'
-'
-' ============================================================
-' DEBUGGING
-' ============================================================
-'
-' You can enable extra prints by defining:
-'
-'   MBSE_Debug
-'   MBTCP_Debug
-'   VALIDATION_Debug
-'
-' ============================================================
-
-'' #define MBSE_Debug
-'' #define MBTCP_Debug
-'' #define VALIDATION_Debug
+'      - Production server or client logic (harness only).
+'      - Real-world I/O (simulated via emulator).
+' -------------------------------------------------------------------------
 
 #include "modbustcp_server.bi"
 #include "modbustcp.bi"
 
-
-' ============================================================
+' -------------------------------------------------------------------------
 ' HARNESS CONFIGURATION
-' ============================================================
+' -------------------------------------------------------------------------
 
 const HARNESS_HOST as string  = "127.0.0.1"
-const HARNESS_PORT as integer = 502
+const HARNESS_PORT as integer = 1502
 
 const WAIT_SERVER_READY_MS as integer = 3000
 const WAIT_CONNECT_MS      as integer = 3000
@@ -90,9 +46,9 @@ const CLIENT_RECV_TIMEOUT_MS_FAST as integer = 200
 const CLIENT_RECV_TIMEOUT_MS_NORM as integer = 1000
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' HARNESS GLOBALS
-' ============================================================
+' -------------------------------------------------------------------------
 
 dim shared serverThreadRunning as integer
 dim shared serverThreadReady as integer
@@ -102,9 +58,9 @@ dim shared gPass as integer
 dim shared gFail as integer
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' DEBUG PRINT ROUTINE
-' ============================================================
+' -------------------------------------------------------------------------
 
 #ifdef VALIDATION_Debug
 sub DBG(msg as string)
@@ -116,9 +72,9 @@ end sub
 #endif
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' TEST RESULT PRINTER
-' ============================================================
+' -------------------------------------------------------------------------
 '
 ' passed = 1 means PASS
 ' passed = 0 means FAIL
@@ -144,9 +100,9 @@ sub TestResult(testName as string, passed as integer, details as string = "")
 end sub
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' FLOAT COMPARISON (NEAR MATCH)
-' ============================================================
+' -------------------------------------------------------------------------
 '
 ' Floating point values are not always exact due to binary rounding.
 '
@@ -156,9 +112,9 @@ function FloatNear( byval a as single, byval b as single, byval eps as single ) 
 end function
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' WAIT UNTIL FLAG MATCHES VALUE
-' ============================================================
+' -------------------------------------------------------------------------
 '
 ' Used to wait for the server thread to indicate readiness.
 '
@@ -179,9 +135,9 @@ function WaitUntil( byref flag as integer, byval want as integer, byval timeoutM
 end function
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' CONNECT CLIENT WITH RETRY
-' ============================================================
+' -------------------------------------------------------------------------
 '
 ' In real-world automation, PLCs may be slow to boot or may reject the
 ' first few connection attempts.
@@ -210,9 +166,9 @@ function ConnectClientOrFail( byref host as string, byval timeoutMs as integer )
 end function
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' SERVER THREAD
-' ============================================================
+' -------------------------------------------------------------------------
 '
 ' This thread runs the Modbus Server Emulator (MBSE).
 '
@@ -257,9 +213,9 @@ end function
 
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' MAIN HARNESS ENTRY POINT
-' ============================================================
+' -------------------------------------------------------------------------
 
 print "========================================"
 print " Modbus TCP Validation Harness (MBSE/MBTCP)"
@@ -271,17 +227,17 @@ dim abortHarness as integer = 0
 dim t as any ptr = 0
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' INITIALIZE SERVER EMULATOR (MBSE)
-' ============================================================
+' -------------------------------------------------------------------------
 
 DBG("Initializing MBSE...")
 MBSE_Init()
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' CONFIGURE STRICT MODE
-' ============================================================
+' -------------------------------------------------------------------------
 '
 ' Strict mode makes the emulator behave like a real PLC:
 '
@@ -302,9 +258,9 @@ MBSE_AddrCeiling    = 500
 DBG("Configured strict UnitID + ceiling")
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' TEST #0: SERVER-SIDE MEMORY ACCESSORS
-' ============================================================
+' -------------------------------------------------------------------------
 '
 ' This test does NOT involve TCP.
 '
@@ -343,9 +299,9 @@ scope
 end scope
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' PRELOAD SOME MEMORY
-' ============================================================
+' -------------------------------------------------------------------------
 '
 ' This is not strictly required, but it's useful for sanity checking.
 '
@@ -357,9 +313,9 @@ MBSE_WriteHoldingRegister(0, 1234)
 MBSE_WriteInputRegister(0, 4321)
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' START SERVER THREAD
-' ============================================================
+' -------------------------------------------------------------------------
 
 DBG("Starting server thread...")
 
@@ -391,9 +347,9 @@ if abortHarness = 0 then
 end if
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' INIT + CONNECT MBTCP CLIENT
-' ============================================================
+' -------------------------------------------------------------------------
 
 if abortHarness = 0 then
 
@@ -416,9 +372,9 @@ if abortHarness = 0 then
 end if
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' RUN VALIDATION TESTS
-' ============================================================
+' -------------------------------------------------------------------------
 
 if abortHarness = 0 then
 
@@ -1272,9 +1228,28 @@ end if
 
 
 
-' ============================================================
+' -------------------------------------------------------------------------
+' -------------------------------------------------------------------------
+' Test #23: Farm Test (64 Sequential Connections)
+' -------------------------------------------------------------------------
+
+    print
+    print "----------------------------------------"
+    print "Test #23: Farm Test (64 Sequential Connections)"
+    print "----------------------------------------"
+
+    dim as integer farmConnections = 64
+    dim as integer farmPassOk = 1
+    for i as integer = 1 to farmConnections
+        MBTCP_Connect(HARNESS_HOST)
+        if MBP_Connection_Failure <> 0 then farmPassOk = 0: exit for
+        if MBTCP_RetrieveRegister(0) = MBTCP_COMM_ERROR then farmPassOk = 0: exit for
+        MBTCP_Disconnect()
+    next i
+    TestResult("Farm Test", farmPassOk, iif(farmPassOk, "64 connections handled", "Failed"))
+
 ' SUMMARY
-' ============================================================
+' -------------------------------------------------------------------------
 
 print
 print "========================================"
@@ -1286,9 +1261,9 @@ print "========================================"
 print
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' CLEANUP
-' ============================================================
+' -------------------------------------------------------------------------
 '
 ' Always clean up sockets and server threads.
 '
@@ -1308,11 +1283,13 @@ DBG("Shutting down MBSE...")
 MBSE_Shutdown()
 
 
-' ============================================================
+' -------------------------------------------------------------------------
 ' PAUSE IF DOUBLE-CLICKED
-' ============================================================
+' -------------------------------------------------------------------------
 '
 ' If the harness is run from a file explorer, the window will close
 ' immediately. This gives the tech time to read the output.
 '
 if command$ = "" then sleep
+
+' end of validation.bas

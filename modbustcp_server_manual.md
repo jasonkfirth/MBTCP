@@ -58,10 +58,10 @@ This library is designed for:
 
 ### 4.1 Setting up FreeBASIC & FBIDE
 
-1. Download FreeBASIC: http://www.freebasic.net  
-2. Download fbIDE: http://fbide.sourceforge.net  
-3. Install fbIDE  
-4. Install FreeBASIC into the fbIDE directory  
+1. Download FreeBASIC: http://www.freebasic.net
+2. Download fbIDE: http://fbide.sourceforge.net
+3. Install fbIDE
+4. Install FreeBASIC into the fbIDE directory
 
 ---
 
@@ -378,8 +378,8 @@ Starts the Modbus TCP server.
 
 #### Return Values
 
-- 1 = success  
-- 0 = failure  
+- 1 = success
+- 0 = failure
 
 ---
 
@@ -658,8 +658,8 @@ Discrete inputs represent single-bit input values.
 
     sub MBSE_WriteDiscreteInput(byval addr as integer, byval value as ubyte)
 
-- addr: 0 to 99999  
-- value: 0 or 1  
+- addr: 0 to 99999
+- value: 0 or 1
 
 ---
 
@@ -717,8 +717,8 @@ Reads a value from a discrete input (1XXXXX).
 #### Introduction
 Writes a 32-bit integer into two holding registers.
 
-- addr     = low word  
-- addr + 1 = high word  
+- addr     = low word
+- addr + 1 = high word
 
 ---
 
@@ -783,8 +783,8 @@ Reads a 32-bit integer from two holding registers.
 #### Introduction
 Writes a 32-bit floating point value into two holding registers.
 
-- addr     = low word  
-- addr + 1 = high word  
+- addr     = low word
+- addr + 1 = high word
 
 ---
 
@@ -982,8 +982,8 @@ In real systems, some PLCs ignore Unit ID, while others require a match.
 
 #### Values
 
-- 0 = ignore Unit ID (default)  
-- 1 = enforce Unit ID  
+- 0 = ignore Unit ID (default)
+- 1 = enforce Unit ID
 
 ---
 
@@ -1032,7 +1032,7 @@ Defines the Unit ID value required when strict mode is enabled.
 
 #### Range
 
-- 0 to 255  
+- 0 to 255
 
 ---
 
@@ -1409,10 +1409,10 @@ Common failure cases:
 
 Typical usage:
 
-1. Initialize library  
-2. Configure global variables (optional)  
-3. Start server  
-4. Modify memory during runtime  
-5. Allow clients to interact  
-6. Stop server  
+1. Initialize library
+2. Configure global variables (optional)
+3. Start server
+4. Modify memory during runtime
+5. Allow clients to interact
+6. Stop server
 7. Shutdown library
