@@ -128,10 +128,23 @@ sub mbse_set_expected_unit_id_c cdecl alias "mbse_set_expected_unit_id" (byval i
 end sub
 
 sub mbse_set_addr_ceiling_c cdecl alias "mbse_set_addr_ceiling" (byval ceiling as long)
-    MBSE_AddrCeiling = ceiling
+    if ceiling < 0 then
+        MBSE_AddrCeiling = 0
+    elseif ceiling > MBSE_MAX_ADDR then
+        MBSE_AddrCeiling = MBSE_MAX_ADDR
+    else
+        MBSE_AddrCeiling = ceiling
+    end if
 end sub
 
 sub mbse_set_client_timeouts_c cdecl alias "mbse_set_client_timeouts" (byval recv_ms as long, byval send_ms as long)
+    if recv_ms < 0 then
+        recv_ms = 0
+    end if
+    if send_ms < 0 then
+        send_ms = 0
+    end if
+
     MBSE_ClientRecvTimeoutMS = recv_ms
     MBSE_ClientSendTimeoutMS = send_ms
 end sub

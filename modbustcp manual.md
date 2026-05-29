@@ -70,7 +70,7 @@ Copy MBTCP.bi into your project directory and include:
 ### 5.1 MBTCP_Init
 
 #### Introduction
-Initialises the library (e.g. Winsock on Win32).
+Initialises the library and prepares the client transport path.
 
 #### Parameters
 None
@@ -80,7 +80,7 @@ Must be called before any MBTCP operations.
 
 #### Example
 
-    #include "ModbusTCP.bi"
+    #include "modbustcp.bi"
     MBTCP_Init()
 
 ---
@@ -117,10 +117,10 @@ Call before program exit.
 - Connects to PLC
 
 #### Errors
-- Resolve failure → MBTCP_resolveHost(): invalid address
-- Socket failure → MBTCP: socket()
-- Connect failure → MBTCP: connect()
-- Sets MBP_Connection_Failure = 1
+- Resolve failure to MBTCP_resolveHost(): invalid address
+- Socket failure to MBTCP: Open TCP failed
+- Connect failure to MBTCP: Open TCP connect failed
+- Sets MBTCP_Connection_Failure = 1
 
 #### Example
 
@@ -139,7 +139,7 @@ Returns 16-bit value from holding register (4XXXXX).
     function MBTCP_RetrieveRegister (RegisterNumber as short) as integer
 
 #### Usage
-Reads a single holding register. Addressing starts at 0. Use MBP_ZeroOffset if required.
+Reads a single holding register. Addressing starts at 0. Use MBTCP_ZeroOffset if required.
 
 #### Example
 
@@ -517,7 +517,7 @@ Writes multiple coils (FC15).
 
 ## 6.0 Additional Global Variables
 
-### 6.1 MBP_UnitID
+### 6.1 MBTCP_UnitID
 
 Defines Modbus Unit Identifier.
 
@@ -526,7 +526,7 @@ Defines Modbus Unit Identifier.
 
 Example:
 
-    MBP_UnitID = 255
+    MBTCP_UnitID = 255
 
 ---
 

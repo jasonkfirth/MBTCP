@@ -46,6 +46,44 @@ make
 
 This will produce the `.a` files and the `validation_c` test executable.
 
+### API notes
+
+The C client wrapper now exposes explicit runtime helpers:
+
+- `mbtcp_runtime_init()`
+- `mbtcp_runtime_shutdown()`
+
+Call `mbtcp_runtime_init()` once before opening sockets in long-running hosts and
+`mbtcp_runtime_shutdown()` when process-level teardown is desired.
+
+### C validation harness options
+
+`validation_c` supports both command-line and environment-based configuration.
+
+Command-line options:
+
+```bash
+./validation_c \
+  --host 127.0.0.1 \
+  --port 1502 \
+  --connect-timeout 3000 \
+  --socket-timeout 1000 \
+  --farm 64 \
+  --raw-workers 8 \
+  --raw-iterations 8
+```
+
+Environment overrides:
+
+- `MBTCP_HARNESS_HOST`
+- `MBTCP_HARNESS_PORT`
+- `MBTCP_CONNECT_TIMEOUT_MS`
+- `MBTCP_SOCKET_TIMEOUT_MS`
+- `MBTCP_FARM_CONNECTIONS`
+- `MBTCP_RAW_WORKERS`
+- `MBTCP_RAW_ITERATIONS`
+- `MBTCP_RAW_TIMEOUT_MS`
+
 ## API Overview
 
 The C API follows the FreeBASIC API closely, but uses lowercase names:

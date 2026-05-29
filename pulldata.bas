@@ -32,15 +32,15 @@ MBTCP_Init ()
 
 ' PLC Configuration
 const PLC_IP = "192.168.4.126"
-MBP_ZeroOffset = 1
-MBP_UnitID = 1
+MBTCP_ZeroOffset = 1
+MBTCP_UnitID = 1
 
 print "Pulling Register States from "; PLC_IP
 print "Range: 4000 to 32000"
 
 for a as integer = 4000 to 32000
     MBTCP_Connect (PLC_IP)
-    if MBP_Connection_Failure = 0 then
+    if MBTCP_Connection_Failure = 0 then
         dim regVal as integer = MBTCP_RetrieveRegister(a)
         dim floatVal as single = MBTCP_RetrieveFloatRegister(a)
         print  "Addr: "; a; " | Hex: &H"; hex(regVal, 4); " | Float: "; floatVal

@@ -87,22 +87,8 @@
 #ifndef __MBSE_BI__
 #define __MBSE_BI__
 
-#ifdef __FB_WIN32__
-    #include once "win/winsock2.bi"
-    #include once "win/ws2tcpip.bi"
-#else
-    #include once "crt/netdb.bi"
-    #include once "crt/sys/socket.bi"
-    #include once "crt/netinet/in.bi"
-    #include once "crt/arpa/inet.bi"
-    #include once "crt/unistd.bi"
-    #include once "crt/sys/time.bi"
-    #include once "crt/errno.bi"
-#endif
+#include once "fbthread.bi"
 
-
-''
-#include once "fix_errno.bi"
 ' -------------------------------------------------------------------------
 '' Types / constants
 ' -------------------------------------------------------------------------
@@ -110,19 +96,16 @@
 
 const MBSE_MAX_ADDR = 65535
 
-#ifdef __FB_WIN32__
-    type MBSE_SOCK as SOCKET
-    const MBSE_INVALID_SOCKET = cast(MBSE_SOCK, INVALID_SOCKET)
-#else
-    type MBSE_SOCK as integer
-    const MBSE_INVALID_SOCKET = cast(MBSE_SOCK, -1)
-    #ifndef SOCKET_ERROR
-        #define SOCKET_ERROR (-1)
-    #endif
-    #ifndef closesocket
-        #define closesocket close
-    #endif
-#endif
+type MBSE_SOCK as integer
+const MBSE_INVALID_SOCKET as integer = -1
+const MBSE_MIN_VALID_SOCKET as integer = 2
+
+type MBSE_ACCEPT_CTX
+    sock as MBSE_SOCK
+    generation as integer
+end type
+
+
 
 '' Modbus exception codes (standard)
 const MBEX_ILLEGAL_FUNCTION      = 1
@@ -194,8 +177,11 @@ dim shared MBSE_ClientSendTimeoutMS as integer = 2000
 
 dim shared MBSE_ServerSocket as MBSE_SOCK = MBSE_INVALID_SOCKET
 dim shared MBSE_ServerRunning as integer
+dim shared MBSE_ServerGeneration as integer
+dim shared MBSE_ServerListenPort as integer
 dim shared MBSE_LastError as integer
 dim shared MBSE_AcceptThread as any ptr
+dim shared MBSE_AcceptThreadRunning as integer
 
 '' Separate mutex per memory region
 dim shared MBSE_CoilMutex        as any ptr
@@ -301,7 +287,7 @@ declare sub MBSE_Shutdown()
 declare function MBSE_StartServer( byval port as integer ) as integer
 declare sub MBSE_StopServer()
 
-declare function MBSE_AcceptThreadProc( byval unused as any ptr ) as any ptr
+declare function MBSE_AcceptThreadProc( byval context as any ptr ) as any ptr
 declare function MBSE_ClientThreadProc( byval pSock as any ptr ) as any ptr
 
 declare function MBSE_ServerLoopOnce( byval clientSock as MBSE_SOCK ) as integer
@@ -327,7 +313,7 @@ declare sub MBSE_BuildReadRegsResponse( outBuf() as ubyte, byval transHi as ubyt
 declare function MBSE_HandleRequest( req() as ubyte, byval reqLen as integer, resp() as ubyte ) as integer
 
 declare sub MBSE_AddClientSock( byval s as MBSE_SOCK )
-declare sub MBSE_RemoveClientSock( byval s as MBSE_SOCK )
+declare function MBSE_RemoveClientSock( byval s as MBSE_SOCK ) as integer
 
 declare sub MBSE_LogCommEvent( byval eventByte as ubyte )
 declare sub MBSE_IncrementMessageCount()
@@ -335,8 +321,6 @@ declare sub MBSE_IncrementEventCount()
 
 declare sub MBSE_SetServerIDString( byref s as string )
 
-declare function MBSE_LastSockErr() as integer
-declare function MBSE_IsTimeoutOrWouldBlock( byval e as integer ) as integer
 
 
 ''
@@ -379,14 +363,6 @@ declare function MBSE_ReadInputFloat( byval addr as integer ) as single
 
 sub MBSE_Init()
 
-#ifdef __FB_WIN32__
-    '' init winsock
-    dim wsaData as WSAData
-    if( WSAStartup( MAKEWORD( 2, 2 ), @wsaData ) <> 0 ) then
-        print "MBSE: WSAStartup failed"
-        end 1
-    end if
-#endif
 
     '' mutexes (created once)
     if MBSE_CoilMutex = 0 then MBSE_CoilMutex = MutexCreate()
@@ -431,9 +407,6 @@ sub MBSE_Shutdown()
     if MBSE_ClientsMutex <> 0 then MutexDestroy(MBSE_ClientsMutex): MBSE_ClientsMutex = 0
     if MBSE_CommMutex <> 0 then MutexDestroy(MBSE_CommMutex): MBSE_CommMutex = 0
 
-#ifdef __FB_WIN32__
-    WSACleanup()
-#endif
 
     MBSE_DBG("Shutdown")
 end sub
@@ -511,12 +484,15 @@ sub MBSE_AddClientSock( byval s as MBSE_SOCK )
 end sub
 
 
-sub MBSE_RemoveClientSock( byval s as MBSE_SOCK )
+function MBSE_RemoveClientSock( byval s as MBSE_SOCK ) as integer
+    dim removed as integer = 0
+
     MutexLock(MBSE_ClientsMutex)
 
     dim i as integer
     for i = 0 to MBSE_ClientCount-1
         if MBSE_ClientSockList(i) = s then
+            removed = 1
             MBSE_ClientSockList(i) = MBSE_ClientSockList(MBSE_ClientCount-1)
             MBSE_ClientCount -= 1
 
@@ -532,10 +508,8 @@ sub MBSE_RemoveClientSock( byval s as MBSE_SOCK )
     next i
 
     MutexUnlock(MBSE_ClientsMutex)
-end sub
-
-
-
+    return removed
+end function
 ''
 ' -------------------------------------------------------------------------
 '' Start/Stop Server (multi-client)
@@ -551,50 +525,37 @@ function MBSE_StartServer( byval port as integer ) as integer
         return 1
     end if
 
-    '' open socket
-    MBSE_ServerSocket = opensocket( PF_INET, SOCK_STREAM, IPPROTO_TCP )
-    if MBSE_ServerSocket = MBSE_INVALID_SOCKET then
+    MBSE_ServerGeneration += 1
+    dim localGeneration as integer = MBSE_ServerGeneration
+
+    MBSE_ServerSocket = freefile()
+    if ( OPEN TCP SERVER( "host=0.0.0.0,port=" & port & ",backlog=16" AS #MBSE_ServerSocket ) <> 0 ) then
         MBSE_LastError = 1
-        MBSE_DBG("ERROR: socket() failed")
+        MBSE_DBG("ERROR: OPEN TCP SERVER failed")
         return 0
     end if
 
-    '' allow quick restart
-    dim opt as integer = 1
-    setsockopt(MBSE_ServerSocket, SOL_SOCKET, SO_REUSEADDR, cast(any ptr, @opt), sizeof(opt))
-
-    '' bind to port
-    dim sa as sockaddr_in
-    sa.sin_family = AF_INET
-    sa.sin_port = htons( port )
-    sa.sin_addr.S_addr = INADDR_ANY
-
-    MBSE_DBG("Binding socket")
-    if bind( MBSE_ServerSocket, cast( PSOCKADDR, @sa ), sizeof(sa) ) = SOCKET_ERROR then
-        closesocket( MBSE_ServerSocket )
-        MBSE_ServerSocket = MBSE_INVALID_SOCKET
-        MBSE_LastError = 2
-        MBSE_DBG("ERROR: bind() failed")
-        return 0
-    end if
-
-    '' listen
-    MBSE_DBG("Listening")
-    if listen( MBSE_ServerSocket, 16 ) = SOCKET_ERROR then
-        closesocket( MBSE_ServerSocket )
-        MBSE_ServerSocket = MBSE_INVALID_SOCKET
-        MBSE_LastError = 3
-        MBSE_DBG("ERROR: listen() failed")
-        return 0
-    end if
-
+    MBSE_ServerListenPort = port
     MBSE_ServerRunning = 1
     MBSE_DBG("Server is listening")
 
+    dim acceptCtx as MBSE_ACCEPT_CTX ptr = callocate(1, sizeof(MBSE_ACCEPT_CTX))
+    if acceptCtx = 0 then
+        MBSE_DBG("ERROR: callocate(acceptCtx) failed")
+        close #MBSE_ServerSocket
+        MBSE_ServerSocket = MBSE_INVALID_SOCKET
+        MBSE_ServerRunning = 0
+        return 0
+    end if
+
+    acceptCtx->sock = MBSE_ServerSocket
+    acceptCtx->generation = localGeneration
+
     '' accept thread
-    MBSE_AcceptThread = ThreadCreate( cast(MBSE_THREADPROC ptr, @MBSE_AcceptThreadProc), 0 )
+    MBSE_AcceptThread = ThreadCreate( cast(MBSE_THREADPROC ptr, @MBSE_AcceptThreadProc), acceptCtx )
     if MBSE_AcceptThread = 0 then
         MBSE_DBG("ERROR: ThreadCreate(accept) failed")
+        deallocate(acceptCtx)
         MBSE_StopServer()
         return 0
     end if
@@ -610,11 +571,12 @@ sub MBSE_StopServer()
 
     MBSE_DBG("Stopping server")
     MBSE_ServerRunning = 0
+    MBSE_ServerGeneration += 1
+    dim serverPort as integer = MBSE_ServerListenPort
 
-    '' Closing server socket unblocks accept()
+    '' Closing server socket unblocks TCP ACCEPT()
     if MBSE_ServerSocket <> MBSE_INVALID_SOCKET then
-        shutdown( MBSE_ServerSocket, 2 )
-        closesocket( MBSE_ServerSocket )
+        close #MBSE_ServerSocket
         MBSE_ServerSocket = MBSE_INVALID_SOCKET
         MBSE_DBG("Server socket closed")
     end if
@@ -624,23 +586,50 @@ sub MBSE_StopServer()
     dim i as integer
     for i = 0 to MBSE_ClientCount-1
         if MBSE_ClientSockList(i) <> MBSE_INVALID_SOCKET then
-            shutdown( MBSE_ClientSockList(i), 2 )
-            closesocket( MBSE_ClientSockList(i) )
+            close #MBSE_ClientSockList(i)
         end if
     next i
     MBSE_ClientCount = 0
     erase MBSE_ClientSockList
     MutexUnlock(MBSE_ClientsMutex)
 
-    '' Wait for accept thread to exit
+    if serverPort > 0 then
+        dim as integer probeAttempt
+        dim as MBSE_SOCK probeSock
+
+        for probeAttempt = 1 to 256
+            if MBSE_AcceptThreadRunning = 0 then
+                exit for
+            end if
+
+            probeSock = freefile()
+            if ( OPEN TCP( "host=127.0.0.1,port=" & serverPort AS #probeSock ) = 0 ) then
+                close #probeSock
+                MBSE_DBG("Sent wake-up probe during server stop")
+                sleep 1, 1
+                exit for
+            end if
+
+            sleep 2, 1
+        next
+    end if
+
+    '' The accept thread can block in TCP ACCEPT even after server socket close.
+    '' Use detach semantics to avoid hard hangs while still allowing the thread
+    '' to return and release its resources.
+    dim as any ptr acceptThread = MBSE_AcceptThread
     if MBSE_AcceptThread <> 0 then
-        ThreadWait(MBSE_AcceptThread)
+        dim as integer waitCount = 0
+        while ( MBSE_AcceptThreadRunning <> 0 ) and ( waitCount < 200 )
+            sleep 1, 1
+            waitCount += 1
+        wend
         MBSE_AcceptThread = 0
-        MBSE_DBG("Accept thread exited")
+        ThreadDetach(acceptThread)
+        MBSE_DBG("Accept thread detached for best-effort cleanup")
     end if
 
 end sub
-
 
 
 ''
@@ -649,38 +638,44 @@ end sub
 ' -------------------------------------------------------------------------
 ''
 
-function MBSE_AcceptThreadProc( byval unused as any ptr ) as any ptr
+function MBSE_AcceptThreadProc( byval context as any ptr ) as any ptr
 
-    dim addr as sockaddr_in
+    dim ctx as MBSE_ACCEPT_CTX ptr = cast(MBSE_ACCEPT_CTX ptr, context)
+    dim listenSock as MBSE_SOCK
+    dim generation as integer
+    if ctx = 0 then
+        return 0
+    end if
 
-    while MBSE_ServerRunning <> 0
+    listenSock = ctx->sock
+    generation = ctx->generation
+    deallocate(ctx)
 
-        dim addrlen as integer = sizeof(addr)
+    MBSE_AcceptThreadRunning = 1
+
+    while MBSE_ServerRunning <> 0 andalso generation = MBSE_ServerGeneration
 
         MBSE_DBG("Waiting for client connection...")
 
         dim c as MBSE_SOCK
-        c = accept( MBSE_ServerSocket, cast(PSOCKADDR, @addr), @addrlen )
+        c = TCP ACCEPT( #listenSock )
 
-        if c = MBSE_INVALID_SOCKET then
-            if MBSE_ServerRunning = 0 then exit while
-            MBSE_DBG("accept() failed (or interrupted)")
-            continue while
+        if MBSE_ServerRunning = 0 or generation <> MBSE_ServerGeneration then
+            if c > MBSE_MIN_VALID_SOCKET then
+                close #c
+            end if
+            exit while
         end if
 
-        '' If we are stopping, close the accepted socket immediately (race fix)
-        if MBSE_ServerRunning = 0 then
-            shutdown(c, 2)
-            closesocket(c)
-            exit while
+        if c <= MBSE_INVALID_SOCKET then
+            if MBSE_ServerRunning = 0 then exit while
+            MBSE_DBG("TCP ACCEPT returned 0 (or interrupted)")
+            continue while
         end if
 
         MBSE_DBG("Client connected")
 
         MBSE_AddClientSock(c)
-
-        '' configure timeouts for this client
-        MBSE_SetClientTimeouts(c, MBSE_ClientRecvTimeoutMS, MBSE_ClientSendTimeoutMS)
 
         '' Spawn client handler thread. We pass the socket value via heap storage.
         dim p as MBSE_SOCK ptr = callocate(1, sizeof(MBSE_SOCK))
@@ -689,18 +684,19 @@ function MBSE_AcceptThreadProc( byval unused as any ptr ) as any ptr
         dim th as any ptr = ThreadCreate( cast(MBSE_THREADPROC ptr, @MBSE_ClientThreadProc), p )
         if th = 0 then
             MBSE_DBG("ERROR: ThreadCreate(client) failed; closing client")
-            MBSE_RemoveClientSock(c)
-            shutdown(c, 2)
-            closesocket(c)
+            if MBSE_RemoveClientSock(c) <> 0 then
+                close #c
+            end if
             deallocate(p)
         end if
 
     wend
 
+    MBSE_AcceptThreadRunning = 0
+
     return 0
 
 end function
-
 
 
 ''
@@ -722,10 +718,9 @@ function MBSE_ClientThreadProc( byval pSock as any ptr ) as any ptr
     wend
 
     MBSE_DBG("Client disconnecting/ending thread")
-
-    MBSE_RemoveClientSock(c)
-    shutdown(c, 2)
-    closesocket(c)
+    if MBSE_RemoveClientSock(c) <> 0 then
+        close #c
+    end if
 
     return 0
 
@@ -845,50 +840,7 @@ end function
 
 function MBSE_SetClientTimeouts( byval sock as MBSE_SOCK, byval recvMS as integer, byval sendMS as integer ) as integer
 
-#ifdef __FB_WIN32__
-    dim tv as integer
-
-    tv = recvMS
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, cast(any ptr, @tv), sizeof(tv))
-
-    tv = sendMS
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, cast(any ptr, @tv), sizeof(tv))
-#else
-    dim t as timeval
-
-    t.tv_sec  = recvMS \ 1000
-    t.tv_usec = (recvMS mod 1000) * 1000
-    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, cast(any ptr, @t), sizeof(t))
-
-    t.tv_sec  = sendMS \ 1000
-    t.tv_usec = (sendMS mod 1000) * 1000
-    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, cast(any ptr, @t), sizeof(t))
-#endif
-
     return 1
-end function
-
-
-function MBSE_LastSockErr() as integer
-#ifdef __FB_WIN32__
-    return WSAGetLastError()
-#else
-    return errno
-#endif
-end function
-
-
-function MBSE_IsTimeoutOrWouldBlock( byval e as integer ) as integer
-#ifdef __FB_WIN32__
-    if e = WSAETIMEDOUT then return -1
-    if e = WSAEWOULDBLOCK then return -1
-    return 0
-#else
-    if e = EAGAIN then return -1
-    if e = EWOULDBLOCK then return -1
-    if e = ETIMEDOUT then return -1
-    return 0
-#endif
 end function
 
 
@@ -898,32 +850,56 @@ end function
 '' Reads exactly 'expected' bytes unless:
 ''   - connection closed
 ''   - timeout
-''   - fatal recv error
-''
 function MBSE_RecvExact( byval sock as MBSE_SOCK, byval buf as ubyte ptr, byval expected as integer ) as integer
 
     dim total as integer = 0
     dim got as integer
+    dim as double startTime
+    dim as integer chunkLen
+    dim as string chunk
+    dim as integer i
+
+    if expected <= 0 then
+        return 0
+    end if
+
+    if sock = MBSE_INVALID_SOCKET then
+        return MBSE_RECV_CLOSED
+    end if
+
+    startTime = timer
 
     while total < expected
 
-        got = recv( sock, buf + total, expected - total, 0 )
+        if eof( sock ) = 0 then
+            chunkLen = expected - total
+            if chunkLen > 256 then chunkLen = 256
 
-        if got = 0 then
+            chunk = input( chunkLen, #sock )
+            got = len( chunk )
+
+            if got > 0 then
+                for i = 1 to got
+                    buf[ total + i - 1 ] = asc( mid( chunk, i, 1 ) )
+                next i
+
+                total += got
+            elseif eoc( sock ) <> 0 then
+                return MBSE_RECV_CLOSED
+            end if
+
+        elseif eoc( sock ) <> 0 then
             return MBSE_RECV_CLOSED
         end if
 
-        if got < 0 then
-            dim e as integer = MBSE_LastSockErr()
-
-            if MBSE_IsTimeoutOrWouldBlock(e) then
-                return MBSE_RECV_TIMEOUT
+        if total < expected then
+            if ( MBSE_ClientRecvTimeoutMS > 0 ) then
+                if ( (timer - startTime) * 1000.0 >= MBSE_ClientRecvTimeoutMS ) then
+                    return MBSE_RECV_TIMEOUT
+                end if
             end if
-
-            return MBSE_RECV_FATAL
+            sleep 1, 1
         end if
-
-        total += got
 
     wend
 
@@ -935,18 +911,20 @@ end function
 function MBSE_SendAll( byval sock as MBSE_SOCK, byval buf as ubyte ptr, byval length as integer ) as integer
 
     dim total as integer = 0
-    dim sent as integer
+    dim as ubyte b
+
+    if sock = MBSE_INVALID_SOCKET then
+        return 0
+    end if
 
     while total < length
-
-        sent = send( sock, buf + total, length - total, 0 )
-
-        if sent <= 0 then
+        if eoc( sock ) <> 0 then
             return 0
         end if
 
-        total += sent
-
+        b = buf[ total ]
+        put #sock, , b
+        total += 1
     wend
 
     return 1
@@ -1521,7 +1499,7 @@ function MBSE_HandleRequest( req() as ubyte, byval reqLen as integer, resp() as 
         '' NOTE:
         ''   The Modbus spec response is FC + 1 status byte.
         ''   The canonical client/harness used in this project expects a
-        ''   “read-like” response with a byte count of 1, then the status byte.
+        ''   Â“read-likeÂ” response with a byte count of 1, then the status byte.
         ''
         ''   So we return: UnitID, FC07, ByteCount=1, Status
         ''   (MBAP Length = 4, total bytes = 10)
@@ -1592,7 +1570,7 @@ function MBSE_HandleRequest( req() as ubyte, byval reqLen as integer, resp() as 
                     '' Clear Counters and Diagnostic Register
                     '' IMPORTANT:
                     ''   The validation harness expects the comm-event log to be EMPTY after this call.
-                    ''   So: clear, respond, and DO NOT re-log FC08 as a “new event”.
+                    ''   So: clear, respond, and DO NOT re-log FC08 as a Â“new eventÂ”.
 
                     MutexLock(MBSE_CommMutex)
                     MBSE_CommEventCounter = 0

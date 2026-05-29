@@ -50,6 +50,8 @@ typedef struct {
  / ------------------------------------------------------------------------- */
 
 void mbtcp_init(void);
+void mbtcp_runtime_init(void);
+void mbtcp_runtime_shutdown(void);
 void mbtcp_set_port(int32_t port);
 void mbtcp_connect(const char* ip);
 void mbtcp_disconnect(void);

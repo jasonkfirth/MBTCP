@@ -1,0 +1,151 @@
+changelog
+=========
+
+Date: 2026-05-29
+Base Commit: 7f9e23e
+
+Since: Merge pull request #2 from jasonkfirth/c-port
+
+Implemented changes
+-------------------
+
+- Server restart reliability for TCP acceptor teardown (`modbustcp_server.bi`)
+  - Why:
+    - Validation test #22 and #23 had timing-dependent failures after stop/start cycles.
+    - `TCP ACCEPT()` could remain blocked while the listener appeared closed, leaving the port in use long enough to make immediate restart fail with `EADDRINUSE`.
+    - A non-deterministic stale acceptor prevents deterministic `MBSE_StopServer()`/`MBSE_StartServer()` round trips.
+  - What changed:
+    - Added `MBSE_ServerListenPort` to track the active listen port per server start.
+    - `MBSE_StopServer()` now sends short local wake-up probes using `OPEN TCP("host=127.0.0.1,port=...")` while the accept thread is still running.
+    - Probe strategy is bounded and only used during shutdown, then closes immediately when connected.
+    - Kept existing generation-based accept-thread coordination in place so new generations can ignore old thread instances.
+  - Effect on behavior:
+    - Stop now reliably wakes the acceptor path, allowing the old thread to exit before the next start.
+    - Restart and sequential connection loops no longer depend on long sleeps or port release timing windows.
+
+- Protocol naming cleanup: replace Modbus Plus-style symbol prefix (`MBP_`) with protocol family prefix (`MBTCP_`) project-wide
+  - Why:
+    - The codebase had mixed naming where legacy `MBP_` globals and error/state names were used in a Modbus TCP-only client/library.
+    - This naming mismatch caused confusion for users and made API docs/tests harder to keep aligned with runtime behavior.
+  - What changed:
+    - Renamed core shared globals in `modbustcp.bi`:
+      - `MBP_INVALID_SOCKET` to `MBTCP_INVALID_SOCKET`
+      - `MBP_Socket` to `MBTCP_Socket`
+      - `MBP_CurrentTransaction` to `MBTCP_CurrentTransaction`
+      - `MBP_Connection_Failure` to `MBTCP_Connection_Failure`
+      - `MBP_Socket_Error` to `MBTCP_Socket_Error`
+      - `MBP_ZeroOffset` to `MBTCP_ZeroOffset`
+      - `MBP_UnitID` to `MBTCP_UnitID`
+      - `MBP_Port` to `MBTCP_Port`
+      - `MBP_RecvTimeoutMS` to `MBTCP_RecvTimeoutMS`
+      - `MBP_Common_LastError` to `MBTCP_Common_LastError`
+    - Updated all callsites in examples/tests:
+      - `TestPLC.bas`, `pulldata.bas`, `validation.bas`
+      - `mbtcp_wrapper.bas`
+      - Manual references in `modbustcp manual.md`
+  - Why this also improved stability:
+    - Reduces risk of incorrect assumptions that the code was using Modbus Plus semantics.
+    - Better aligns symbol names with file/module purpose and public entry points.
+
+- Build artifact ignore cleanup in `.gitignore`
+  - Why:
+    - Build output noise obscured review and risked accidental commits of generated binaries/libraries.
+  - What changed:
+    - Kept existing executable ignores (`pulldata`, `TestPLC`, `validation`) and grouped them under "Compiled FreeBASIC test binaries."
+    - Added FreeBASIC/object-level ignores: `*.o`, `*.obj`, `*.exe`, `*.asm`
+    - Added static/library artifact ignores: `*.a`, `*.lib`
+    - Added C validation binary ignore: `validation_c`
+
+- TCP command migration to native FreeBASIC transport primitives
+  - Why:
+    - The previous implementation mixed portability assumptions and low-level socket references in both client and server paths.
+    - Standardizing on `OPEN TCP`, `OPEN TCP SERVER`, and EOF checks reduces OS-specific branching and aligns with existing examples and target runtime behavior.
+  - What changed:
+    - Client connection path now relies on `OPEN TCP` for active sessions.
+    - Server listener path now uses `OPEN TCP SERVER` for accept/listen handling.
+    - Added/retained EOF-based liveness checks (`eof()`) for connection lifecycle and read-time failure handling.
+    - Updated shutdown/cleanup paths to close both listener and accepted sockets through the same FreeBASIC file-handle model, then nulling handles to avoid stale descriptors.
+    - Removed legacy platform-specific transport assumptions in handling text and error paths.
+
+Verification completed
+---------------------
+
+- Preceded by latest server reliability and validation pass updates above.
+
+
+Earlier implemented changes
+-------------------------
+
+- C validation harness hardening and expansion (`C_Library/validation_c.c`)
+  - Why:
+    - The original harness was fixed to one endpoint and one behavior pattern, making it hard to reproduce environment-specific failures or run CI in different networks.
+    - Raw-frame checks were too limited; malformed responses could pass silently if parsing was weak or ambiguous.
+    - Concurrency behavior was under-tested, leaving race/liveness issues undiscovered.
+  - Added environment-driven configuration for host/port/timeouts and test sizing.
+  - Added CLI flags for runtime harness configuration:
+    - `--host`, `--port`, `--connect-timeout`, `--socket-timeout`, `--farm`,
+      `--raw-workers`, `--raw-iterations`.
+  - Introduced raw socket helpers for exact reads and timeout setup.
+  - Added malformed/invalid-frame tests:
+    - MBAP protocol-ID validation (non-response case),
+    - truncated MBAP frame handling.
+  - Added concurrent raw-client stress test for parallel readback.
+  - Parameterized hard-coded endpoint and timeout values so harness behavior is configurable.
+
+- C bridge/runtime initialization (`C_Library/mbtcp.h`, `mbtcp_wrapper.bas`, `mbtcp_server_wrapper.bas`)
+  - Why:
+    - The C harness depends on FreeBASIC runtime state that was previously not guaranteed to be initialized from C callers, causing intermittent startup failures.
+    - Clear lifecycle entry/exit points were needed so both FB and C entry paths behave consistently.
+  - Added exported runtime lifecycle APIs:
+    - `mbtcp_runtime_init()`
+    - `mbtcp_runtime_shutdown()`
+  - Wired C-callable wrappers so C harness can initialize/shutdown FreeBASIC runtime safely.
+  - Added argument validation and safe limits in wrapper call paths:
+    - multiple register and coil write/read bounds checks.
+  - Kept existing wrapper behavior intact while improving safety for array marshaling.
+
+- Modbus client/server protocol and server reliability improvements (`modbustcp.bi`, `modbustcp_server.bi`)
+  - Why:
+    - Host parsing needed stricter behavior to avoid accepting malformed host strings that can resolve unpredictably on some platforms.
+    - Server socket reuse behavior was not fully defensive; missing checks could hide startup failures and leave transient binding issues unobserved.
+  - Improved host resolution to prefer strict IPv4 parse behavior and stronger name resolution behavior.
+  - Hardened server socket startup by checking `SO_REUSEADDR` and adding guarded `SO_REUSEPORT` setup where available.
+  - Updated related comments and defensive behavior around transport setup.
+
+- Validation test coverage updates (`validation.bas`)
+  - Why:
+    - Existing validation only covered many end-to-end flows; it missed direct parser-guard verification for protocol framing and exception-path behavior.
+    - This made it harder to prove malformed inputs were rejected for the right reasons.
+  - Added MBTCP frame integrity checks with `MBTCP_CheckFrameCommon`:
+    - bad protocol ID reject
+    - bad transaction ID continuity check
+    - wrong UnitID handling
+    - exception response decoding path
+    - short-frame guard
+  - Preserved existing client/server scenario tests while extending failure-path coverage.
+
+- C API/documentation updates (`C_Library/README.md`)
+  - Why:
+    - New harness/runtime APIs were not discoverable, which made integration and troubleshooting slower for downstream users.
+  - Added usage notes for new runtime init/shutdown wrappers.
+  - Added C harness environment/CLI configuration documentation.
+
+- Manual/server notes update (`modbustcp_server_manual.md`)
+  - Why:
+    - The docs had drifted from implementation and needed alignment so operational guidance still matched actual behavior.
+  - Synced documentation wording/notes with the newer socket and protocol behavior.
+
+Verification completed
+---------------------
+
+- `./validation`
+  - PASS: 32
+  - FAIL: 0
+- `./C_Library/validation_c`
+  - PASS: 9
+  - FAIL: 0
+
+Note
+----
+- Build artifacts were removed from the workspace as part of this cleanup pass.
+  Regenerate them with `make` (and `make` targets under `C_Library`) when needed.

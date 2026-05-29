@@ -43,7 +43,7 @@ end sub
 sub PrintReadValue(testName as string, value as integer)
     ' Handles printing of results from read operations.
     if value = MBTCP_COMM_ERROR then
-        PrintResult(testName, 0, MBP_Common_LastError)
+        PrintResult(testName, 0, MBTCP_Common_LastError)
     else
         PrintResult(testName, 1, "Value=" & value)
     end if
@@ -70,8 +70,8 @@ print "Initializing MBTCP..."
 MBTCP_Init()
 
 ' Configuration
-MBP_ZeroOffset = 0
-MBP_RecvTimeoutMS = 800
+MBTCP_ZeroOffset = 0
+MBTCP_RecvTimeoutMS = 800
 
 print "PLC Address: "; plcIP
 print "Port: 502"
@@ -85,11 +85,11 @@ print "----------------------------------------"
 print "Connecting..."
 print "----------------------------------------"
 
-MBP_Connection_Failure = 0
+MBTCP_Connection_Failure = 0
 MBTCP_Connect(plcIP)
 
-if MBP_Connection_Failure <> 0 then
-    PrintResult("TCP Connect", 0, MBP_Common_LastError)
+if MBTCP_Connection_Failure <> 0 then
+    PrintResult("TCP Connect", 0, MBTCP_Common_LastError)
     print
     print "Could not connect to PLC."
     print "Check IP, network, firewall, and port 502."
@@ -117,25 +117,25 @@ dim unitOK as integer = 0
 dim chosenUnit as integer = 255
 
 for i as integer = 0 to 2
-    MBP_UnitID = unitCandidates(i)
-    print "Trying UnitID="; MBP_UnitID; "..."
+    MBTCP_UnitID = unitCandidates(i)
+    print "Trying UnitID="; MBTCP_UnitID; "..."
     dim idStr as string
     if MBTCP_ReportServerID(idStr) = 0 then
-        PrintResult("FC11 ReportServerID", 1, "UnitID=" & MBP_UnitID & " ID='" & idStr & "'")
+        PrintResult("FC11 ReportServerID", 1, "UnitID=" & MBTCP_UnitID & " ID='" & idStr & "'")
         unitOK = 1
-        chosenUnit = MBP_UnitID
+        chosenUnit = MBTCP_UnitID
         exit for
     else
-        PrintResult("FC11 ReportServerID", 0, "UnitID=" & MBP_UnitID & " (" & MBP_Common_LastError & ")")
+        PrintResult("FC11 ReportServerID", 0, "UnitID=" & MBTCP_UnitID & " (" & MBTCP_Common_LastError & ")")
     end if
 next i
 
 if unitOK = 0 then
     print "No UnitID responded to FC11. Using 255."
-    MBP_UnitID = 255
+    MBTCP_UnitID = 255
 else
     print "Using UnitID="; chosenUnit
-    MBP_UnitID = chosenUnit
+    MBTCP_UnitID = chosenUnit
 end if
 
 ' -------------------------------------------------------------------------

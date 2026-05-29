@@ -29,19 +29,7 @@
 ' External Headers & Platform Compatibility
 ' -------------------------------------------------------------------------
 
-#ifdef __FB_WIN32__
-    #include once "win/winsock2.bi"
-#else
-    #include once "crt/netdb.bi"
-    #include once "crt/sys/socket.bi"
-    #include once "crt/netinet/in.bi"
-    #include once "crt/arpa/inet.bi"
-    #include once "crt/unistd.bi"
-#ifndef __FB_WIN32__
-    #include once "crt/sys/time.bi"
-    #include once "crt/stdio.bi"
-#endif
-#endif
+#include once "crt/stdio.bi"
 
 
 ' -------------------------------------------------------------------------
@@ -64,26 +52,20 @@ declare sub MBTCP_reportError( byref msg as string )
 declare sub MBTCP_Init()
 declare sub MBTCP_Connect (IPAddress as string)
 declare sub MBTCP_Disconnect()
+declare sub MBTCP_CloseSocket()
 
 ' -------------------------------------------------------------------------
 ' Declarations: Data Reception & Validation
 ' -------------------------------------------------------------------------
 
-#ifdef __FB_WIN32__
-    declare function MBTCP_RecvExact( byval sock as SOCKET, _
-                                     byval buf as ubyte ptr, _
-                                     byval expected as integer ) as integer
-
-    declare function MBTCP_RecvModbusFrame( byval sock as SOCKET, _
-                                           buf() as ubyte ) as integer
-#else
-    declare function MBTCP_RecvExact( byval sock as integer, _
-                                     byval buf as ubyte ptr, _
-                                     byval expected as integer ) as integer
-
-    declare function MBTCP_RecvModbusFrame( byval sock as integer, _
-                                           buf() as ubyte ) as integer
-#endif
+declare function MBTCP_RecvExact( byval sock as integer, _
+                                 byval buf as ubyte ptr, _
+                                 byval expected as integer ) as integer
+declare function MBTCP_RecvModbusFrame( byval sock as integer, _
+                                       buf() as ubyte ) as integer
+declare function MBTCP_SendAll( byval sock as integer, _
+                               byval buf as ubyte ptr, _
+                               byval length as integer ) as integer
 
 declare function MBTCP_CheckFrameCommon( _
         frame() as ubyte, _
@@ -186,25 +168,22 @@ const MBTCP_COMM_ERROR = -32768
 ' Global State
 ' -------------------------------------------------------------------------
 
-#ifdef __FB_WIN32__
-    dim shared MBP_Socket as SOCKET
-#else
-    dim shared MBP_Socket as integer
-#endif
+const MBTCP_INVALID_SOCKET as integer = -1
+dim shared MBTCP_Socket as integer = MBTCP_INVALID_SOCKET
 
-dim shared MBP_CurrentTransaction as integer
-dim shared MBP_Connection_Failure as integer
-dim shared MBP_Socket_Error as integer
-dim shared MBP_ZeroOffset as integer = 0
-dim shared MBP_UnitID as integer = 255
-dim shared MBP_Port as integer = 502
+dim shared MBTCP_CurrentTransaction as integer
+dim shared MBTCP_Connection_Failure as integer
+dim shared MBTCP_Socket_Error as integer
+dim shared MBTCP_ZeroOffset as integer = 0
+dim shared MBTCP_UnitID as integer = 255
+dim shared MBTCP_Port as integer = 502
 declare sub MBTCP_SetPort(byval port as integer)
 sub MBTCP_SetPort(byval port as integer)
-MBP_Port = port
+MBTCP_Port = port
 end sub
 
-dim shared MBP_RecvTimeoutMS as integer = 1000   ' default 1 second
-dim shared MBP_Common_LastError as string
+dim shared MBTCP_RecvTimeoutMS as integer = 1000   ' default 1 second
+dim shared MBTCP_Common_LastError as string
 
 
 
@@ -227,7 +206,7 @@ end sub
 
 
 sub MBTCP_SetLastError( byref msg as string )
-    MBP_Common_LastError = msg
+    MBTCP_Common_LastError = msg
     MBTCP_DBG("LastError = " & msg)
 end sub
 
@@ -256,63 +235,24 @@ end sub
 sub MBTCP_Connect (hostname as string)
 
     MBTCP_SetLastError("")
-    MBP_Connection_Failure = 0
-    MBP_Socket_Error = 0
+    MBTCP_Connection_Failure = 0
+    MBTCP_Socket_Error = 0
 
-    dim ip as integer
-
-    MBTCP_DBG("Resolving Hostname: " & hostname)
-
-    ip = MBTCP_resolveHost( hostname )
-    if( ip = 0 ) then
-        MBTCP_SetLastError("MBTCP_Connect: MBTCP_resolveHost() failed for '" & hostname & "'")
-        print "MBTCP_resolveHost(): invalid address"
-        MBP_Connection_Failure = 1
-        exit sub
+    if MBTCP_Socket <> MBTCP_INVALID_SOCKET then
+    MBTCP_CloseSocket()
     end if
 
-    MBTCP_DBG("Opening Socket")
-
-    MBP_Socket = opensocket( PF_INET, SOCK_STREAM, IPPROTO_TCP )
-    if( MBP_Socket = 0 ) then
-        MBTCP_SetLastError("MBTCP_Connect: socket() failed")
-        MBTCP_reportError( "MBTCP: socket()" )
-        MBP_Connection_Failure = 1
-        exit sub
-    end if
-
-    MBTCP_DBG("Connecting to Host on port " & MBP_Port)
-
-    dim sa as sockaddr_in
-    sa.sin_port        = htons( MBP_Port )
-    sa.sin_family      = AF_INET
-    sa.sin_addr.S_addr = ip
-
-    if( connect( MBP_Socket, cast( PSOCKADDR, @sa ), sizeof( sa ) ) = SOCKET_ERROR ) then
-        MBTCP_SetLastError("MBTCP_Connect: connect() failed to '" & hostname & ":502'")
-        MBTCP_reportError( "MBTCP: connect()" )
-        closesocket( MBP_Socket )
-        MBP_Socket = 0
-        MBP_Connection_Failure = 1
+    MBTCP_Socket = freefile()
+    if( OPEN TCP( "host=" & hostname & ",port=" & MBTCP_Port AS #MBTCP_Socket ) <> 0 ) then
+        MBTCP_SetLastError("MBTCP_Connect: OPEN TCP failed for '" & hostname & ":" & MBTCP_Port & "'")
+        MBTCP_reportError( "MBTCP: OPEN TCP()" )
+        MBTCP_Socket = MBTCP_INVALID_SOCKET
+        MBTCP_Connection_Failure = 1
         exit sub
     end if
 
     MBTCP_DBG("Connected successfully")
-
-    MBTCP_DBG("Setting socket recv/send timeout = " & MBP_RecvTimeoutMS & " ms")
-
-#ifdef __FB_WIN32__
-    dim tv as integer
-    tv = MBP_RecvTimeoutMS
-    setsockopt(MBP_Socket, SOL_SOCKET, SO_RCVTIMEO, cast(any ptr, @tv), sizeof(tv))
-    setsockopt(MBP_Socket, SOL_SOCKET, SO_SNDTIMEO, cast(any ptr, @tv), sizeof(tv))
-#else
-    dim tv as timeval
-    tv.tv_sec  = MBP_RecvTimeoutMS \ 1000
-    tv.tv_usec = (MBP_RecvTimeoutMS mod 1000) * 1000
-    setsockopt(MBP_Socket, SOL_SOCKET, SO_RCVTIMEO, cast(any ptr, @tv), sizeof(tv))
-    setsockopt(MBP_Socket, SOL_SOCKET, SO_SNDTIMEO, cast(any ptr, @tv), sizeof(tv))
-#endif
+    MBTCP_DBG("Receive timeout is " & MBTCP_RecvTimeoutMS & " ms (applied in OpenTCP poll loop)")
 
 end sub
 
@@ -321,55 +261,114 @@ end sub
 sub MBTCP_Disconnect( )
     MBTCP_DBG("Disconnecting socket")
 
-    if MBP_Socket <> 0 then
-        shutdown( MBP_Socket, 2 )
-        closesocket( MBP_Socket )
-        MBP_Socket = 0
+    if MBTCP_Socket <> MBTCP_INVALID_SOCKET then
+    MBTCP_CloseSocket()
     end if
 end sub
 
+
+
+sub MBTCP_CloseSocket()
+    if MBTCP_Socket <> MBTCP_INVALID_SOCKET then
+        close #MBTCP_Socket
+        MBTCP_Socket = MBTCP_INVALID_SOCKET
+    end if
+end sub
 
 
 ' -------------------------------------------------------------------------
 ' MBTCP_RecvExact
 ' -------------------------------------------------------------------------
 
-#ifdef __FB_WIN32__
-function MBTCP_RecvExact( byval sock as SOCKET, _
-                          byval buf as ubyte ptr, _
-                          byval expected as integer ) as integer
-#else
 function MBTCP_RecvExact( byval sock as integer, _
                           byval buf as ubyte ptr, _
                           byval expected as integer ) as integer
-#endif
 
     dim as integer total = 0
     dim as integer got
+    dim as double startTime
+    dim as integer chunkLen
+    dim as string chunk
+    dim as integer i
 
     MBTCP_DBG("RecvExact expecting " & expected & " bytes")
 
+    if expected <= 0 then
+        return 0
+    end if
+
+    if sock = MBTCP_INVALID_SOCKET then
+        return 0
+    end if
+
+    startTime = timer
     while total < expected
 
-        got = recv(sock, buf + total, expected - total, 0)
+        if eof( sock  ) = 0 then
+            chunkLen = expected - total
+            if chunkLen > 256 then chunkLen = 256
 
-        if got = 0 then
+            chunk = input( chunkLen, #sock )
+            got = len( chunk )
+
+            if got > 0 then
+                for i = 1 to got
+                    buf[ total + i - 1 ] = asc( mid( chunk, i, 1 ) )
+                next i
+
+                total += got
+            elseif eoc( sock ) <> 0 then
+                MBTCP_DBG("RecvExact: connection closed")
+                MBTCP_SetLastError("MBTCP_RecvExact: connection closed")
+                return 0
+            end if
+
+        elseif eoc( sock ) <> 0 then
             MBTCP_DBG("RecvExact: connection closed")
             MBTCP_SetLastError("MBTCP_RecvExact: connection closed")
             return 0
         end if
 
-        if got < 0 then
-            MBTCP_DBG("RecvExact: recv error/timeout " & got)
-            MBTCP_SetLastError("MBTCP_RecvExact: recv() failed or timed out")
-            return 0
+        if total < expected then
+            if ( MBTCP_RecvTimeoutMS > 0 ) then
+                if ( (timer - startTime) * 1000.0 >= MBTCP_RecvTimeoutMS ) then
+                    MBTCP_DBG("RecvExact: recv timed out")
+                    MBTCP_SetLastError("MBTCP_RecvExact: recv() failed or timed out")
+                    return 0
+                end if
+            end if
+            sleep 1, 1
         end if
-
-        total += got
 
     wend
 
     return total
+
+end function
+
+
+function MBTCP_SendAll( byval sock as integer, _
+                        byval buf as ubyte ptr, _
+                        byval length as integer ) as integer
+
+    dim as integer sent = 0
+    dim as ubyte b
+
+    if sock = MBTCP_INVALID_SOCKET then
+        return 0
+    end if
+
+    while sent < length
+        if eoc( sock ) <> 0 then
+            return 0
+        end if
+
+        b = buf[ sent ]
+        put #sock, , b
+        sent += 1
+    wend
+
+    return 1
 
 end function
 
@@ -379,20 +378,15 @@ end function
 ' MBTCP_RecvModbusFrame
 ' -------------------------------------------------------------------------
 
-#ifdef __FB_WIN32__
-function MBTCP_RecvModbusFrame( byval sock as SOCKET, _
-                               buf() as ubyte ) as integer
-#else
 function MBTCP_RecvModbusFrame( byval sock as integer, _
                                buf() as ubyte ) as integer
-#endif
 
     dim as integer got
     dim as ubyte header6(0 to 5)
 
     got = MBTCP_RecvExact(sock, @header6(0), 6)
     if got <> 6 then
-        if MBP_Common_LastError = "" then
+        if MBTCP_Common_LastError = "" then
             MBTCP_SetLastError("MBTCP_RecvModbusFrame: failed reading MBAP header")
         end if
         return MBTCP_COMM_ERROR
@@ -425,7 +419,7 @@ function MBTCP_RecvModbusFrame( byval sock as integer, _
 
     got = MBTCP_RecvExact(sock, @buf(6), lengthField)
     if got <> lengthField then
-        if MBP_Common_LastError = "" then
+        if MBTCP_Common_LastError = "" then
             MBTCP_SetLastError("MBTCP_RecvModbusFrame: failed reading full response")
         end if
         return MBTCP_COMM_ERROR
@@ -465,7 +459,7 @@ function MBTCP_CheckFrameCommon( _
         return MBTCP_COMM_ERROR
     end if
 
-    if frame(6) <> (MBP_UnitID and 255) then
+    if frame(6) <> (MBTCP_UnitID and 255) then
         MBTCP_SetLastError("MBTCP_CheckFrameCommon: UnitID mismatch")
         return MBTCP_COMM_ERROR
     end if
@@ -497,40 +491,39 @@ function MBTCP_RetrieveDiscreteInput (CoilNumber as integer) as integer
     MBTCP_SetLastError("")
 
     dim addr as integer
-    addr = (CoilNumber - MBP_ZeroOffset)
+    addr = (CoilNumber - MBTCP_ZeroOffset)
 
-    if MBTCP_ValidateAddr16(addr, "MBTCP_RetrieveDiscreteInput") = 0 then
+    if MBTCP_ValidateAddr16(addr, "MBTCP_RetrieveDiscreteInput" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
     dim Request as zstring * 13
 
-    MBP_CurrentTransaction += 1
-    if MBP_CurrentTransaction > 255 then MBP_CurrentTransaction = 0
+    MBTCP_CurrentTransaction += 1
+    if MBTCP_CurrentTransaction > 255 then MBTCP_CurrentTransaction = 0
 
-    Request = chr (0, MBP_CurrentTransaction, _
+    Request = chr (0, MBTCP_CurrentTransaction, _
                    0, 0, _
                    0, 6, _
-                   MBP_UnitID, _
+                   MBTCP_UnitID, _
                    2, _
                    (addr SHR 8) AND 255, addr AND 255, _
                    0, 1)
 
-    if( send( MBP_Socket, @Request, 12, 0 ) = SOCKET_ERROR ) then
+    if MBTCP_SendAll( MBTCP_Socket, @Request, 12 ) = 0 then
         MBTCP_SetLastError("MBTCP_RetrieveDiscreteInput: send() failed")
         MBTCP_reportError( " MBTCP_DiscreteInput send()" )
-        closesocket( MBP_Socket )
-        MBP_Socket = 0
-        MBP_Socket_Error = 1
+    MBTCP_CloseSocket()
+        MBTCP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
 
     dim frame() as ubyte
     dim bytes as integer
-    bytes = MBTCP_RecvModbusFrame(MBP_Socket, frame())
+    bytes = MBTCP_RecvModbusFrame(MBTCP_Socket, frame())
 
     if bytes <= 0 then
-        if MBP_Common_LastError = "" then
+        if MBTCP_Common_LastError = "" then
             MBTCP_SetLastError("MBTCP_RetrieveDiscreteInput: no response / recv failed")
         end if
         return MBTCP_COMM_ERROR
@@ -538,7 +531,7 @@ function MBTCP_RetrieveDiscreteInput (CoilNumber as integer) as integer
 
     dim ex as integer
     dim rc as integer
-    rc = MBTCP_CheckFrameCommon(frame(), 2, MBP_CurrentTransaction, ex)
+    rc = MBTCP_CheckFrameCommon(frame(), 2, MBTCP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
     if bytes < 10 then
@@ -562,40 +555,39 @@ function MBTCP_RetrieveCoil (CoilNumber as integer) as integer
     MBTCP_SetLastError("")
 
     dim addr as integer
-    addr = (CoilNumber - MBP_ZeroOffset)
+    addr = (CoilNumber - MBTCP_ZeroOffset)
 
-    if MBTCP_ValidateAddr16(addr, "MBTCP_RetrieveCoil") = 0 then
+    if MBTCP_ValidateAddr16(addr, "MBTCP_RetrieveCoil" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
     dim Request as zstring * 13
 
-    MBP_CurrentTransaction += 1
-    if MBP_CurrentTransaction > 255 then MBP_CurrentTransaction = 0
+    MBTCP_CurrentTransaction += 1
+    if MBTCP_CurrentTransaction > 255 then MBTCP_CurrentTransaction = 0
 
-    Request = chr (0, MBP_CurrentTransaction, _
+    Request = chr (0, MBTCP_CurrentTransaction, _
                    0, 0, _
                    0, 6, _
-                   MBP_UnitID, _
+                   MBTCP_UnitID, _
                    1, _
                    (addr SHR 8) AND 255, addr AND 255, _
                    0, 1)
 
-    if( send( MBP_Socket, @Request, 12, 0 ) = SOCKET_ERROR ) then
+    if MBTCP_SendAll( MBTCP_Socket, @Request, 12 ) = 0 then
         MBTCP_SetLastError("MBTCP_RetrieveCoil: send() failed")
         MBTCP_reportError( " MBTCP_RetrieveCoil send()" )
-        closesocket( MBP_Socket )
-        MBP_Socket = 0
-        MBP_Socket_Error = 1
+    MBTCP_CloseSocket()
+        MBTCP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
 
     dim frame() as ubyte
     dim bytes as integer
-    bytes = MBTCP_RecvModbusFrame(MBP_Socket, frame())
+    bytes = MBTCP_RecvModbusFrame(MBTCP_Socket, frame())
 
     if bytes <= 0 then
-        if MBP_Common_LastError = "" then
+        if MBTCP_Common_LastError = "" then
             MBTCP_SetLastError("MBTCP_RetrieveCoil: no response / recv failed")
         end if
         return MBTCP_COMM_ERROR
@@ -603,7 +595,7 @@ function MBTCP_RetrieveCoil (CoilNumber as integer) as integer
 
     dim ex as integer
     dim rc as integer
-    rc = MBTCP_CheckFrameCommon(frame(), 1, MBP_CurrentTransaction, ex)
+    rc = MBTCP_CheckFrameCommon(frame(), 1, MBTCP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
     if bytes < 10 then
@@ -627,40 +619,39 @@ function MBTCP_RetrieveRegister (RegisterNumber as integer) as integer
     MBTCP_SetLastError("")
 
     dim addr as integer
-    addr = (RegisterNumber - MBP_ZeroOffset)
+    addr = (RegisterNumber - MBTCP_ZeroOffset)
 
-    if MBTCP_ValidateAddr16(addr, "MBTCP_RetrieveRegister") = 0 then
+    if MBTCP_ValidateAddr16(addr, "MBTCP_RetrieveRegister" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
     dim Request as zstring * 13
 
-    MBP_CurrentTransaction += 1
-    if MBP_CurrentTransaction > 255 then MBP_CurrentTransaction = 0
+    MBTCP_CurrentTransaction += 1
+    if MBTCP_CurrentTransaction > 255 then MBTCP_CurrentTransaction = 0
 
-    Request = chr (0, MBP_CurrentTransaction, _
+    Request = chr (0, MBTCP_CurrentTransaction, _
                    0, 0, _
                    0, 6, _
-                   MBP_UnitID, _
+                   MBTCP_UnitID, _
                    3, _
                    (addr SHR 8) AND 255, addr AND 255, _
                    0, 1)
 
-    if( send( MBP_Socket, @Request, 12, 0 ) = SOCKET_ERROR ) then
+    if MBTCP_SendAll( MBTCP_Socket, @Request, 12 ) = 0 then
         MBTCP_SetLastError("MBTCP_RetrieveRegister: send() failed")
         MBTCP_reportError( " MBTCP_RetrieveRegister send()" )
-        closesocket( MBP_Socket )
-        MBP_Socket = 0
-        MBP_Socket_Error = 1
+    MBTCP_CloseSocket()
+        MBTCP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
 
     dim frame() as ubyte
     dim bytes as integer
-    bytes = MBTCP_RecvModbusFrame(MBP_Socket, frame())
+    bytes = MBTCP_RecvModbusFrame(MBTCP_Socket, frame())
 
     if bytes <= 0 then
-        if MBP_Common_LastError = "" then
+        if MBTCP_Common_LastError = "" then
             MBTCP_SetLastError("MBTCP_RetrieveRegister: no response / recv failed")
         end if
         return MBTCP_COMM_ERROR
@@ -668,7 +659,7 @@ function MBTCP_RetrieveRegister (RegisterNumber as integer) as integer
 
     dim ex as integer
     dim rc as integer
-    rc = MBTCP_CheckFrameCommon(frame(), 3, MBP_CurrentTransaction, ex)
+    rc = MBTCP_CheckFrameCommon(frame(), 3, MBTCP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
     if frame(8) <> 2 then
@@ -692,40 +683,39 @@ function MBTCP_RetrieveInputRegister (RegisterNumber as integer) as integer
     MBTCP_SetLastError("")
 
     dim addr as integer
-    addr = (RegisterNumber - MBP_ZeroOffset)
+    addr = (RegisterNumber - MBTCP_ZeroOffset)
 
-    if MBTCP_ValidateAddr16(addr, "MBTCP_RetrieveInputRegister") = 0 then
+    if MBTCP_ValidateAddr16(addr, "MBTCP_RetrieveInputRegister" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
     dim Request as zstring * 13
 
-    MBP_CurrentTransaction += 1
-    if MBP_CurrentTransaction > 255 then MBP_CurrentTransaction = 0
+    MBTCP_CurrentTransaction += 1
+    if MBTCP_CurrentTransaction > 255 then MBTCP_CurrentTransaction = 0
 
-    Request = chr (0, MBP_CurrentTransaction, _
+    Request = chr (0, MBTCP_CurrentTransaction, _
                    0, 0, _
                    0, 6, _
-                   MBP_UnitID, _
+                   MBTCP_UnitID, _
                    4, _
                    (addr SHR 8) AND 255, addr AND 255, _
                    0, 1)
 
-    if( send( MBP_Socket, @Request, 12, 0 ) = SOCKET_ERROR ) then
+    if MBTCP_SendAll( MBTCP_Socket, @Request, 12 ) = 0 then
         MBTCP_SetLastError("MBTCP_RetrieveInputRegister: send() failed")
         MBTCP_reportError( " MBTCP_RetrieveInputRegister send()" )
-        closesocket( MBP_Socket )
-        MBP_Socket = 0
-        MBP_Socket_Error = 1
+    MBTCP_CloseSocket()
+        MBTCP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
 
     dim frame() as ubyte
     dim bytes as integer
-    bytes = MBTCP_RecvModbusFrame(MBP_Socket, frame())
+    bytes = MBTCP_RecvModbusFrame(MBTCP_Socket, frame())
 
     if bytes <= 0 then
-        if MBP_Common_LastError = "" then
+        if MBTCP_Common_LastError = "" then
             MBTCP_SetLastError("MBTCP_RetrieveInputRegister: no response / recv failed")
         end if
         return MBTCP_COMM_ERROR
@@ -733,7 +723,7 @@ function MBTCP_RetrieveInputRegister (RegisterNumber as integer) as integer
 
     dim ex as integer
     dim rc as integer
-    rc = MBTCP_CheckFrameCommon(frame(), 4, MBP_CurrentTransaction, ex)
+    rc = MBTCP_CheckFrameCommon(frame(), 4, MBTCP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
     if frame(8) <> 2 then
@@ -757,44 +747,43 @@ function MBTCP_RetrieveLongRegister (RegisterNumber as integer) as long
     MBTCP_SetLastError("")
 
     dim addr as integer
-    addr = (RegisterNumber - MBP_ZeroOffset)
+    addr = (RegisterNumber - MBTCP_ZeroOffset)
 
-    if MBTCP_ValidateAddr16(addr, "MBTCP_RetrieveLongRegister") = 0 then
+    if MBTCP_ValidateAddr16(addr, "MBTCP_RetrieveLongRegister" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
-    if MBTCP_ValidateAddr16(addr + 1, "MBTCP_RetrieveLongRegister") = 0 then
+    if MBTCP_ValidateAddr16(addr + 1, "MBTCP_RetrieveLongRegister" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
     dim Request as zstring * 13
 
-    MBP_CurrentTransaction += 1
-    if MBP_CurrentTransaction > 255 then MBP_CurrentTransaction = 0
+    MBTCP_CurrentTransaction += 1
+    if MBTCP_CurrentTransaction > 255 then MBTCP_CurrentTransaction = 0
 
-    Request = chr (0, MBP_CurrentTransaction, _
+    Request = chr (0, MBTCP_CurrentTransaction, _
                    0, 0, _
                    0, 6, _
-                   MBP_UnitID, _
+                   MBTCP_UnitID, _
                    3, _
                    (addr SHR 8) AND 255, addr AND 255, _
                    0, 2)
 
-    if( send( MBP_Socket, @Request, 12, 0 ) = SOCKET_ERROR ) then
+    if MBTCP_SendAll( MBTCP_Socket, @Request, 12 ) = 0 then
         MBTCP_SetLastError("MBTCP_RetrieveLongRegister: send() failed")
         MBTCP_reportError( " MBTCP_RetrieveLongRegister send()" )
-        closesocket( MBP_Socket )
-        MBP_Socket = 0
-        MBP_Socket_Error = 1
+    MBTCP_CloseSocket()
+        MBTCP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
 
     dim frame() as ubyte
     dim bytes as integer
-    bytes = MBTCP_RecvModbusFrame(MBP_Socket, frame())
+    bytes = MBTCP_RecvModbusFrame(MBTCP_Socket, frame())
 
     if bytes <= 0 then
-        if MBP_Common_LastError = "" then
+        if MBTCP_Common_LastError = "" then
             MBTCP_SetLastError("MBTCP_RetrieveLongRegister: no response / recv failed")
         end if
         return MBTCP_COMM_ERROR
@@ -802,7 +791,7 @@ function MBTCP_RetrieveLongRegister (RegisterNumber as integer) as long
 
     dim ex as integer
     dim rc as integer
-    rc = MBTCP_CheckFrameCommon(frame(), 3, MBP_CurrentTransaction, ex)
+    rc = MBTCP_CheckFrameCommon(frame(), 3, MBTCP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
     if frame(8) <> 4 then
@@ -852,40 +841,39 @@ function MBTCP_WriteRegister (Value as short, RegisterNumber as integer) as inte
     MBTCP_SetLastError("")
 
     dim addr as integer
-    addr = (RegisterNumber - MBP_ZeroOffset)
+    addr = (RegisterNumber - MBTCP_ZeroOffset)
 
-    if MBTCP_ValidateAddr16(addr, "MBTCP_WriteRegister") = 0 then
+    if MBTCP_ValidateAddr16(addr, "MBTCP_WriteRegister" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
     dim Request as zstring * 13
 
-    MBP_CurrentTransaction += 1
-    if MBP_CurrentTransaction > 255 then MBP_CurrentTransaction = 0
+    MBTCP_CurrentTransaction += 1
+    if MBTCP_CurrentTransaction > 255 then MBTCP_CurrentTransaction = 0
 
-    Request = chr (0, MBP_CurrentTransaction, _
+    Request = chr (0, MBTCP_CurrentTransaction, _
                    0, 0, _
                    0, 6, _
-                   MBP_UnitID, _
+                   MBTCP_UnitID, _
                    06, _
                    (addr SHR 8) AND 255, addr AND 255, _
                    (Value SHR 8) AND 255, Value AND 255)
 
-    if( send( MBP_Socket, @Request, 12, 0 ) = SOCKET_ERROR ) then
+    if MBTCP_SendAll( MBTCP_Socket, @Request, 12 ) = 0 then
         MBTCP_SetLastError("MBTCP_WriteRegister: send() failed")
         MBTCP_reportError( " MBTCP_WriteRegister send()" )
-        closesocket( MBP_Socket )
-        MBP_Socket = 0
-        MBP_Socket_Error = 1
+    MBTCP_CloseSocket()
+        MBTCP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
 
     dim frame() as ubyte
     dim bytes as integer
-    bytes = MBTCP_RecvModbusFrame(MBP_Socket, frame())
+    bytes = MBTCP_RecvModbusFrame(MBTCP_Socket, frame())
 
     if bytes <= 0 then
-        if MBP_Common_LastError = "" then
+        if MBTCP_Common_LastError = "" then
             MBTCP_SetLastError("MBTCP_WriteRegister: no response / recv failed")
         end if
         return MBTCP_COMM_ERROR
@@ -893,7 +881,7 @@ function MBTCP_WriteRegister (Value as short, RegisterNumber as integer) as inte
 
     dim ex as integer
     dim rc as integer
-    rc = MBTCP_CheckFrameCommon(frame(), 6, MBP_CurrentTransaction, ex)
+    rc = MBTCP_CheckFrameCommon(frame(), 6, MBTCP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
     if bytes <> 12 then
@@ -923,13 +911,13 @@ end function
 function MBTCP_WriteLongRegister (Value as long, RegisterNumber as integer) as integer
 
     dim addr as integer
-    addr = (RegisterNumber - MBP_ZeroOffset)
+    addr = (RegisterNumber - MBTCP_ZeroOffset)
 
-    if MBTCP_ValidateAddr16(addr, "MBTCP_WriteLongRegister") = 0 then
+    if MBTCP_ValidateAddr16(addr, "MBTCP_WriteLongRegister" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
-    if MBTCP_ValidateAddr16(addr + 1, "MBTCP_WriteLongRegister") = 0 then
+    if MBTCP_ValidateAddr16(addr + 1, "MBTCP_WriteLongRegister" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
@@ -958,9 +946,9 @@ function MBTCP_WriteCoil (Value as integer, CoilNumber as integer) as integer
     MBTCP_SetLastError("")
 
     dim addr as integer
-    addr = (CoilNumber - MBP_ZeroOffset)
+    addr = (CoilNumber - MBTCP_ZeroOffset)
 
-    if MBTCP_ValidateAddr16(addr, "MBTCP_WriteCoil") = 0 then
+    if MBTCP_ValidateAddr16(addr, "MBTCP_WriteCoil" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
@@ -977,32 +965,31 @@ function MBTCP_WriteCoil (Value as integer, CoilNumber as integer) as integer
         coilValueLo = &H00
     end if
 
-    MBP_CurrentTransaction += 1
-    if MBP_CurrentTransaction > 255 then MBP_CurrentTransaction = 0
+    MBTCP_CurrentTransaction += 1
+    if MBTCP_CurrentTransaction > 255 then MBTCP_CurrentTransaction = 0
 
-    Request = chr (0, MBP_CurrentTransaction, _
+    Request = chr (0, MBTCP_CurrentTransaction, _
                    0, 0, _
                    0, 6, _
-                   MBP_UnitID, _
+                   MBTCP_UnitID, _
                    05, _
                    (addr SHR 8) AND 255, addr AND 255, _
                    coilValueHi, coilValueLo)
 
-    if( send( MBP_Socket, @Request, 12, 0 ) = SOCKET_ERROR ) then
+    if MBTCP_SendAll( MBTCP_Socket, @Request, 12 ) = 0 then
         MBTCP_SetLastError("MBTCP_WriteCoil: send() failed")
         MBTCP_reportError( " MBTCP_WriteCoil send()" )
-        closesocket( MBP_Socket )
-        MBP_Socket = 0
-        MBP_Socket_Error = 1
+    MBTCP_CloseSocket()
+        MBTCP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
 
     dim frame() as ubyte
     dim bytes as integer
-    bytes = MBTCP_RecvModbusFrame(MBP_Socket, frame())
+    bytes = MBTCP_RecvModbusFrame(MBTCP_Socket, frame())
 
     if bytes <= 0 then
-        if MBP_Common_LastError = "" then
+        if MBTCP_Common_LastError = "" then
             MBTCP_SetLastError("MBTCP_WriteCoil: no response / recv failed")
         end if
         return MBTCP_COMM_ERROR
@@ -1010,7 +997,7 @@ function MBTCP_WriteCoil (Value as integer, CoilNumber as integer) as integer
 
     dim ex as integer
     dim rc as integer
-    rc = MBTCP_CheckFrameCommon(frame(), 5, MBP_CurrentTransaction, ex)
+    rc = MBTCP_CheckFrameCommon(frame(), 5, MBTCP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
     if bytes <> 12 then
@@ -1048,13 +1035,13 @@ function MBTCP_WriteMultipleRegisters (Values() as ushort, StartRegister as inte
     end if
 
     dim addr as integer
-    addr = (StartRegister - MBP_ZeroOffset)
+    addr = (StartRegister - MBTCP_ZeroOffset)
 
-    if MBTCP_ValidateAddr16(addr, "MBTCP_WriteMultipleRegisters") = 0 then
+    if MBTCP_ValidateAddr16(addr, "MBTCP_WriteMultipleRegisters" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
-    if MBTCP_ValidateAddr16(addr + count - 1, "MBTCP_WriteMultipleRegisters") = 0 then
+    if MBTCP_ValidateAddr16(addr + count - 1, "MBTCP_WriteMultipleRegisters" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
@@ -1069,16 +1056,16 @@ function MBTCP_WriteMultipleRegisters (Values() as ushort, StartRegister as inte
 
     dim Request(0 to 511) as ubyte
 
-    MBP_CurrentTransaction += 1
-    if MBP_CurrentTransaction > 255 then MBP_CurrentTransaction = 0
+    MBTCP_CurrentTransaction += 1
+    if MBTCP_CurrentTransaction > 255 then MBTCP_CurrentTransaction = 0
 
     Request(0) = 0
-    Request(1) = MBP_CurrentTransaction
+    Request(1) = MBTCP_CurrentTransaction
     Request(2) = 0
     Request(3) = 0
     Request(4) = (mbapLength SHR 8) AND 255
     Request(5) = mbapLength AND 255
-    Request(6) = MBP_UnitID
+    Request(6) = MBTCP_UnitID
     Request(7) = 16
 
     Request(8) = (addr SHR 8) AND 255
@@ -1099,21 +1086,20 @@ function MBTCP_WriteMultipleRegisters (Values() as ushort, StartRegister as inte
         p += 2
     next i
 
-    if( send( MBP_Socket, @Request(0), packetLen, 0 ) = SOCKET_ERROR ) then
+    if MBTCP_SendAll( MBTCP_Socket, @Request(0), packetLen ) = 0 then
         MBTCP_SetLastError("MBTCP_WriteMultipleRegisters: send() failed")
         MBTCP_reportError( " MBTCP_WriteMultipleRegisters send()" )
-        closesocket( MBP_Socket )
-        MBP_Socket = 0
-        MBP_Socket_Error = 1
+    MBTCP_CloseSocket()
+        MBTCP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
 
     dim frame() as ubyte
     dim bytes as integer
-    bytes = MBTCP_RecvModbusFrame(MBP_Socket, frame())
+    bytes = MBTCP_RecvModbusFrame(MBTCP_Socket, frame())
 
     if bytes <= 0 then
-        if MBP_Common_LastError = "" then
+        if MBTCP_Common_LastError = "" then
             MBTCP_SetLastError("MBTCP_WriteMultipleRegisters: no response / recv failed")
         end if
         return MBTCP_COMM_ERROR
@@ -1121,7 +1107,7 @@ function MBTCP_WriteMultipleRegisters (Values() as ushort, StartRegister as inte
 
     dim ex as integer
     dim rc as integer
-    rc = MBTCP_CheckFrameCommon(frame(), 16, MBP_CurrentTransaction, ex)
+    rc = MBTCP_CheckFrameCommon(frame(), 16, MBTCP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
     if bytes <> 12 then
@@ -1153,13 +1139,13 @@ function MBTCP_WriteMultipleCoils (Values() as ubyte, StartCoil as integer) as i
     end if
 
     dim addr as integer
-    addr = (StartCoil - MBP_ZeroOffset)
+    addr = (StartCoil - MBTCP_ZeroOffset)
 
-    if MBTCP_ValidateAddr16(addr, "MBTCP_WriteMultipleCoils") = 0 then
+    if MBTCP_ValidateAddr16(addr, "MBTCP_WriteMultipleCoils" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
-    if MBTCP_ValidateAddr16(addr + count - 1, "MBTCP_WriteMultipleCoils") = 0 then
+    if MBTCP_ValidateAddr16(addr + count - 1, "MBTCP_WriteMultipleCoils" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
@@ -1174,16 +1160,16 @@ function MBTCP_WriteMultipleCoils (Values() as ubyte, StartCoil as integer) as i
 
     dim Request(0 to 2047) as ubyte
 
-    MBP_CurrentTransaction += 1
-    if MBP_CurrentTransaction > 255 then MBP_CurrentTransaction = 0
+    MBTCP_CurrentTransaction += 1
+    if MBTCP_CurrentTransaction > 255 then MBTCP_CurrentTransaction = 0
 
     Request(0) = 0
-    Request(1) = MBP_CurrentTransaction
+    Request(1) = MBTCP_CurrentTransaction
     Request(2) = 0
     Request(3) = 0
     Request(4) = (mbapLength SHR 8) AND 255
     Request(5) = mbapLength AND 255
-    Request(6) = MBP_UnitID
+    Request(6) = MBTCP_UnitID
     Request(7) = 15
 
     Request(8) = (addr SHR 8) AND 255
@@ -1212,21 +1198,20 @@ function MBTCP_WriteMultipleCoils (Values() as ubyte, StartCoil as integer) as i
         bitIndex += 1
     next i
 
-    if( send( MBP_Socket, @Request(0), packetLen, 0 ) = SOCKET_ERROR ) then
+    if MBTCP_SendAll( MBTCP_Socket, @Request(0), packetLen ) = 0 then
         MBTCP_SetLastError("MBTCP_WriteMultipleCoils: send() failed")
         MBTCP_reportError( " MBTCP_WriteMultipleCoils send()" )
-        closesocket( MBP_Socket )
-        MBP_Socket = 0
-        MBP_Socket_Error = 1
+    MBTCP_CloseSocket()
+        MBTCP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
 
     dim frame() as ubyte
     dim bytes as integer
-    bytes = MBTCP_RecvModbusFrame(MBP_Socket, frame())
+    bytes = MBTCP_RecvModbusFrame(MBTCP_Socket, frame())
 
     if bytes <= 0 then
-        if MBP_Common_LastError = "" then
+        if MBTCP_Common_LastError = "" then
             MBTCP_SetLastError("MBTCP_WriteMultipleCoils: no response / recv failed")
         end if
         return MBTCP_COMM_ERROR
@@ -1234,7 +1219,7 @@ function MBTCP_WriteMultipleCoils (Values() as ubyte, StartCoil as integer) as i
 
     dim ex as integer
     dim rc as integer
-    rc = MBTCP_CheckFrameCommon(frame(), 15, MBP_CurrentTransaction, ex)
+    rc = MBTCP_CheckFrameCommon(frame(), 15, MBTCP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
     if bytes <> 12 then
@@ -1257,25 +1242,25 @@ function MBTCP_MaskWriteRegister( _
     MBTCP_SetLastError("")
 
     dim addr as integer
-    addr = (registerNumber - MBP_ZeroOffset)
+    addr = (registerNumber - MBTCP_ZeroOffset)
 
-    if MBTCP_ValidateAddr16(addr, "MBTCP_MaskWriteRegister") = 0 then
+    if MBTCP_ValidateAddr16(addr, "MBTCP_MaskWriteRegister" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
     dim Request(0 to 13) as ubyte
 
-    MBP_CurrentTransaction += 1
-    if MBP_CurrentTransaction > 255 then MBP_CurrentTransaction = 0
+    MBTCP_CurrentTransaction += 1
+    if MBTCP_CurrentTransaction > 255 then MBTCP_CurrentTransaction = 0
 
     Request(0) = 0
-    Request(1) = MBP_CurrentTransaction
+    Request(1) = MBTCP_CurrentTransaction
     Request(2) = 0
     Request(3) = 0
     Request(4) = 0
     Request(5) = 8
 
-    Request(6) = MBP_UnitID
+    Request(6) = MBTCP_UnitID
     Request(7) = 22
 
     Request(8)  = (addr SHR 8) AND 255
@@ -1287,18 +1272,18 @@ function MBTCP_MaskWriteRegister( _
     Request(12) = (orMask SHR 8) AND 255
     Request(13) = orMask AND 255
 
-    if send(MBP_Socket, @Request(0), 14, 0) = SOCKET_ERROR then
+    if MBTCP_SendAll( MBTCP_Socket, @Request(0), 14 ) = 0 then
         MBTCP_SetLastError("MBTCP_MaskWriteRegister: send() failed")
-        MBP_Socket_Error = 1
+        MBTCP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
 
     dim frame() as ubyte
     dim bytes as integer
-    bytes = MBTCP_RecvModbusFrame(MBP_Socket, frame())
+    bytes = MBTCP_RecvModbusFrame(MBTCP_Socket, frame())
 
     if bytes <= 0 then
-        if MBP_Common_LastError = "" then
+        if MBTCP_Common_LastError = "" then
             MBTCP_SetLastError("MBTCP_MaskWriteRegister: no response / recv failed")
         end if
         return MBTCP_COMM_ERROR
@@ -1306,7 +1291,7 @@ function MBTCP_MaskWriteRegister( _
 
     dim ex as integer
     dim rc as integer
-    rc = MBTCP_CheckFrameCommon(frame(), 22, MBP_CurrentTransaction, ex)
+    rc = MBTCP_CheckFrameCommon(frame(), 22, MBTCP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
     if bytes <> 14 then
@@ -1354,24 +1339,24 @@ function MBTCP_ReadExceptionStatus() as integer
 
     dim Request as zstring * 13
 
-    MBP_CurrentTransaction += 1
-    if MBP_CurrentTransaction > 255 then MBP_CurrentTransaction = 0
+    MBTCP_CurrentTransaction += 1
+    if MBTCP_CurrentTransaction > 255 then MBTCP_CurrentTransaction = 0
 
-    Request = chr(0, MBP_CurrentTransaction, _
+    Request = chr(0, MBTCP_CurrentTransaction, _
                   0, 0, _
                   0, 2, _
-                  MBP_UnitID, _
+                  MBTCP_UnitID, _
                   7)
 
-    if send(MBP_Socket, @Request, 8, 0) = SOCKET_ERROR then
+    if MBTCP_SendAll( MBTCP_Socket, @Request, 8 ) = 0 then
         MBTCP_SetLastError("MBTCP_ReadExceptionStatus: send() failed")
-        MBP_Socket_Error = 1
+        MBTCP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
 
     dim frame() as ubyte
     dim bytes as integer
-    bytes = MBTCP_RecvModbusFrame(MBP_Socket, frame())
+    bytes = MBTCP_RecvModbusFrame(MBTCP_Socket, frame())
 
     if bytes <= 0 then
         MBTCP_SetLastError("MBTCP_ReadExceptionStatus: no response")
@@ -1380,7 +1365,7 @@ function MBTCP_ReadExceptionStatus() as integer
 
     dim ex as integer
     dim rc as integer
-    rc = MBTCP_CheckFrameCommon(frame(), 7, MBP_CurrentTransaction, ex)
+    rc = MBTCP_CheckFrameCommon(frame(), 7, MBTCP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
     if bytes < 10 then
@@ -1409,31 +1394,31 @@ function MBTCP_Diagnostics( _
 
     dim Request(0 to 11) as ubyte
 
-    MBP_CurrentTransaction += 1
-    if MBP_CurrentTransaction > 255 then MBP_CurrentTransaction = 0
+    MBTCP_CurrentTransaction += 1
+    if MBTCP_CurrentTransaction > 255 then MBTCP_CurrentTransaction = 0
 
     Request(0) = 0
-    Request(1) = MBP_CurrentTransaction
+    Request(1) = MBTCP_CurrentTransaction
     Request(2) = 0
     Request(3) = 0
     Request(4) = 0
     Request(5) = 6
-    Request(6) = MBP_UnitID
+    Request(6) = MBTCP_UnitID
     Request(7) = 8
     Request(8) = (subFunc SHR 8) AND 255
     Request(9) = subFunc AND 255
     Request(10) = (inData SHR 8) AND 255
     Request(11) = inData AND 255
 
-    if send(MBP_Socket, @Request(0), 12, 0) = SOCKET_ERROR then
+    if MBTCP_SendAll( MBTCP_Socket, @Request(0), 12 ) = 0 then
         MBTCP_SetLastError("MBTCP_Diagnostics: send() failed")
-        MBP_Socket_Error = 1
+        MBTCP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
 
     dim frame() as ubyte
     dim bytes as integer
-    bytes = MBTCP_RecvModbusFrame(MBP_Socket, frame())
+    bytes = MBTCP_RecvModbusFrame(MBTCP_Socket, frame())
 
     if bytes <= 0 then
         MBTCP_SetLastError("MBTCP_Diagnostics: no response")
@@ -1442,7 +1427,7 @@ function MBTCP_Diagnostics( _
 
     dim ex as integer
     dim rc as integer
-    rc = MBTCP_CheckFrameCommon(frame(), 8, MBP_CurrentTransaction, ex)
+    rc = MBTCP_CheckFrameCommon(frame(), 8, MBTCP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
     if bytes < 12 then
@@ -1465,24 +1450,24 @@ function MBTCP_GetCommEventCounter( outRes as MBTCP_CommEventCounterResult ) as 
 
     dim Request as zstring * 13
 
-    MBP_CurrentTransaction += 1
-    if MBP_CurrentTransaction > 255 then MBP_CurrentTransaction = 0
+    MBTCP_CurrentTransaction += 1
+    if MBTCP_CurrentTransaction > 255 then MBTCP_CurrentTransaction = 0
 
-    Request = chr(0, MBP_CurrentTransaction, _
+    Request = chr(0, MBTCP_CurrentTransaction, _
                   0, 0, _
                   0, 2, _
-                  MBP_UnitID, _
+                  MBTCP_UnitID, _
                   11)
 
-    if send(MBP_Socket, @Request, 8, 0) = SOCKET_ERROR then
+    if MBTCP_SendAll( MBTCP_Socket, @Request, 8 ) = 0 then
         MBTCP_SetLastError("MBTCP_GetCommEventCounter: send() failed")
-        MBP_Socket_Error = 1
+        MBTCP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
 
     dim frame() as ubyte
     dim bytes as integer
-    bytes = MBTCP_RecvModbusFrame(MBP_Socket, frame())
+    bytes = MBTCP_RecvModbusFrame(MBTCP_Socket, frame())
 
     if bytes <= 0 then
         MBTCP_SetLastError("MBTCP_GetCommEventCounter: no response")
@@ -1491,7 +1476,7 @@ function MBTCP_GetCommEventCounter( outRes as MBTCP_CommEventCounterResult ) as 
 
     dim ex as integer
     dim rc as integer
-    rc = MBTCP_CheckFrameCommon(frame(), 11, MBP_CurrentTransaction, ex)
+    rc = MBTCP_CheckFrameCommon(frame(), 11, MBTCP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
     if bytes < 12 then
@@ -1524,24 +1509,24 @@ function MBTCP_GetCommEventLog( outRes as MBTCP_CommEventLogResult ) as integer
 
     dim Request as zstring * 13
 
-    MBP_CurrentTransaction += 1
-    if MBP_CurrentTransaction > 255 then MBP_CurrentTransaction = 0
+    MBTCP_CurrentTransaction += 1
+    if MBTCP_CurrentTransaction > 255 then MBTCP_CurrentTransaction = 0
 
-    Request = chr(0, MBP_CurrentTransaction, _
+    Request = chr(0, MBTCP_CurrentTransaction, _
                   0, 0, _
                   0, 2, _
-                  MBP_UnitID, _
+                  MBTCP_UnitID, _
                   12)
 
-    if send(MBP_Socket, @Request, 8, 0) = SOCKET_ERROR then
+    if MBTCP_SendAll( MBTCP_Socket, @Request, 8 ) = 0 then
         MBTCP_SetLastError("MBTCP_GetCommEventLog: send() failed")
-        MBP_Socket_Error = 1
+        MBTCP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
 
     dim frame() as ubyte
     dim bytes as integer
-    bytes = MBTCP_RecvModbusFrame(MBP_Socket, frame())
+    bytes = MBTCP_RecvModbusFrame(MBTCP_Socket, frame())
 
     if bytes <= 0 then
         MBTCP_SetLastError("MBTCP_GetCommEventLog: no response")
@@ -1550,7 +1535,7 @@ function MBTCP_GetCommEventLog( outRes as MBTCP_CommEventLogResult ) as integer
 
     dim ex as integer
     dim rc as integer
-    rc = MBTCP_CheckFrameCommon(frame(), 12, MBP_CurrentTransaction, ex)
+    rc = MBTCP_CheckFrameCommon(frame(), 12, MBTCP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
     if bytes < 15 then
@@ -1595,24 +1580,24 @@ function MBTCP_ReportServerID( byref outId as string ) as integer
 
     dim Request as zstring * 13
 
-    MBP_CurrentTransaction += 1
-    if MBP_CurrentTransaction > 255 then MBP_CurrentTransaction = 0
+    MBTCP_CurrentTransaction += 1
+    if MBTCP_CurrentTransaction > 255 then MBTCP_CurrentTransaction = 0
 
-    Request = chr(0, MBP_CurrentTransaction, _
+    Request = chr(0, MBTCP_CurrentTransaction, _
                   0, 0, _
                   0, 2, _
-                  MBP_UnitID, _
+                  MBTCP_UnitID, _
                   17)
 
-    if send(MBP_Socket, @Request, 8, 0) = SOCKET_ERROR then
+    if MBTCP_SendAll( MBTCP_Socket, @Request, 8 ) = 0 then
         MBTCP_SetLastError("MBTCP_ReportServerID: send() failed")
-        MBP_Socket_Error = 1
+        MBTCP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
 
     dim frame() as ubyte
     dim bytes as integer
-    bytes = MBTCP_RecvModbusFrame(MBP_Socket, frame())
+    bytes = MBTCP_RecvModbusFrame(MBTCP_Socket, frame())
 
     if bytes <= 0 then
         MBTCP_SetLastError("MBTCP_ReportServerID: no response")
@@ -1621,7 +1606,7 @@ function MBTCP_ReportServerID( byref outId as string ) as integer
 
     dim ex as integer
     dim rc as integer
-    rc = MBTCP_CheckFrameCommon(frame(), 17, MBP_CurrentTransaction, ex)
+    rc = MBTCP_CheckFrameCommon(frame(), 17, MBTCP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
     if bytes < 10 then
@@ -1695,22 +1680,22 @@ function MBTCP_ReadWriteMultipleRegisters( _
     dim readAddr as integer
     dim writeAddr as integer
 
-    readAddr = readStart - MBP_ZeroOffset
-    writeAddr = writeStart - MBP_ZeroOffset
+    readAddr = readStart - MBTCP_ZeroOffset
+    writeAddr = writeStart - MBTCP_ZeroOffset
 
-    if MBTCP_ValidateAddr16(readAddr, "MBTCP_ReadWriteMultipleRegisters") = 0 then
+    if MBTCP_ValidateAddr16(readAddr, "MBTCP_ReadWriteMultipleRegisters" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
-    if MBTCP_ValidateAddr16(writeAddr, "MBTCP_ReadWriteMultipleRegisters") = 0 then
+    if MBTCP_ValidateAddr16(writeAddr, "MBTCP_ReadWriteMultipleRegisters" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
-    if MBTCP_ValidateAddr16(readAddr + readQty - 1, "MBTCP_ReadWriteMultipleRegisters") = 0 then
+    if MBTCP_ValidateAddr16(readAddr + readQty - 1, "MBTCP_ReadWriteMultipleRegisters" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
-    if MBTCP_ValidateAddr16(writeAddr + writeQty - 1, "MBTCP_ReadWriteMultipleRegisters") = 0 then
+    if MBTCP_ValidateAddr16(writeAddr + writeQty - 1, "MBTCP_ReadWriteMultipleRegisters" ) = 0 then
         return MBTCP_COMM_ERROR
     end if
 
@@ -1725,16 +1710,16 @@ function MBTCP_ReadWriteMultipleRegisters( _
 
     dim Request(0 to 1023) as ubyte
 
-    MBP_CurrentTransaction += 1
-    if MBP_CurrentTransaction > 255 then MBP_CurrentTransaction = 0
+    MBTCP_CurrentTransaction += 1
+    if MBTCP_CurrentTransaction > 255 then MBTCP_CurrentTransaction = 0
 
     Request(0) = 0
-    Request(1) = MBP_CurrentTransaction
+    Request(1) = MBTCP_CurrentTransaction
     Request(2) = 0
     Request(3) = 0
     Request(4) = (mbapLength SHR 8) AND 255
     Request(5) = mbapLength AND 255
-    Request(6) = MBP_UnitID
+    Request(6) = MBTCP_UnitID
     Request(7) = 23
 
     Request(8)  = (readAddr SHR 8) AND 255
@@ -1758,15 +1743,15 @@ function MBTCP_ReadWriteMultipleRegisters( _
         p += 2
     next i
 
-    if send(MBP_Socket, @Request(0), packetLen, 0) = SOCKET_ERROR then
+    if MBTCP_SendAll( MBTCP_Socket, @Request(0), packetLen ) = 0 then
         MBTCP_SetLastError("MBTCP_ReadWriteMultipleRegisters: send() failed")
-        MBP_Socket_Error = 1
+        MBTCP_Socket_Error = 1
         return MBTCP_COMM_ERROR
     end if
 
     dim frame() as ubyte
     dim bytes as integer
-    bytes = MBTCP_RecvModbusFrame(MBP_Socket, frame())
+    bytes = MBTCP_RecvModbusFrame(MBTCP_Socket, frame())
 
     if bytes <= 0 then
         MBTCP_SetLastError("MBTCP_ReadWriteMultipleRegisters: no response")
@@ -1775,7 +1760,7 @@ function MBTCP_ReadWriteMultipleRegisters( _
 
     dim ex as integer
     dim rc as integer
-    rc = MBTCP_CheckFrameCommon(frame(), 23, MBP_CurrentTransaction, ex)
+    rc = MBTCP_CheckFrameCommon(frame(), 23, MBTCP_CurrentTransaction, ex)
     if rc <> 0 then return rc
 
     if bytes < 10 then
@@ -1836,52 +1821,30 @@ end sub
 
 function MBTCP_resolveHost( byref hostname as string ) as integer
 
-    dim ia as in_addr
-    dim hostentry as hostent ptr
+    hostname = trim( hostname )
 
-    ia.S_addr = inet_addr( hostname )
-    if ( ia.S_addr = INADDR_NONE ) then
-
-        hostentry = gethostbyname( hostname )
-        if ( hostentry = 0 ) then
-            exit function
-        end if
-
-        function = *cast( integer ptr, *hostentry->h_addr_list )
-    else
-        function = ia.S_addr
+    if len( hostname ) = 0 then
+        return 0
     end if
+
+    return 1
 
 end function
 
 
 
 sub MBTCP_reportError( byref msg as string )
-#ifdef __FB_WIN32__
-    print msg; ": error #" & WSAGetLastError( )
-#else
-    perror( msg )
-#endif
+    print msg
 end sub
 
 
 
 sub MBTCP_doInit( )
-#ifdef __FB_WIN32__
-    dim wsaData as WSAData
-    if( WSAStartup( MAKEWORD( 1, 1 ), @wsaData ) <> 0 ) then
-        print "MBTCP Error: WSAStartup failed"
-        end 1
-    end if
-#endif
 end sub
 
 
 
 sub MBTCP_doShutdown( )
-#ifdef __FB_WIN32__
-    WSACleanup( )
-#endif
 end sub
 
 

@@ -22,12 +22,40 @@
 
 extern "C"
 
+    declare sub fb_hRtInit()
+    declare sub fb_hRtExit()
+
+' -------------------------------------------------------------------------
+' Runtime Helpers
+' -------------------------------------------------------------------------
+
+sub mbtcp_runtime_init_c cdecl alias "mbtcp_runtime_init" ()
+    fb_hRtInit()
+    MBTCP_doInit()
+end sub
+
+sub mbtcp_runtime_shutdown_c cdecl alias "mbtcp_runtime_shutdown" ()
+    fb_hRtExit()
+    MBTCP_doShutdown()
+end sub
+
+' -------------------------------------------------------------------------
+' Constants
+' -------------------------------------------------------------------------
+
+const MBTCP_MAX_REGISTER_WRITE_QTY = 123
+const MBTCP_MAX_COIL_WRITE_QTY     = 1968
+
 ' -------------------------------------------------------------------------
 ' Connection and Initialization
 ' -------------------------------------------------------------------------
 
 sub mbtcp_set_port_c cdecl alias "mbtcp_set_port" (byval port as long)
-    MBTCP_SetPort(port)
+    if port <= 0 or port > 65535 then
+        MBTCP_Port = 502
+    else
+        MBTCP_SetPort(port)
+    end if
 end sub
 
 sub mbtcp_init_c cdecl alias "mbtcp_init" ()
@@ -92,20 +120,26 @@ function mbtcp_write_float_register_c cdecl alias "mbtcp_write_float_register" (
 end function
 
 function mbtcp_write_multiple_registers_c cdecl alias "mbtcp_write_multiple_registers" (byval values as ushort ptr, byval count as long, byval start_reg as long) as long
-    if values = 0 or count <= 0 then return MBTCP_COMM_ERROR
+    if values = 0 or count <= 0 or count > MBTCP_MAX_REGISTER_WRITE_QTY then return MBTCP_COMM_ERROR
+
     dim fb_values(0 to count-1) as ushort
-    for i as long = 0 to count-1
+    dim i as long
+    for i = 0 to count-1
         fb_values(i) = values[i]
     next
+
     return MBTCP_WriteMultipleRegisters(fb_values(), start_reg)
 end function
 
 function mbtcp_write_multiple_coils_c cdecl alias "mbtcp_write_multiple_coils" (byval values as ubyte ptr, byval count as long, byval start_coil as long) as long
-    if values = 0 or count <= 0 then return MBTCP_COMM_ERROR
+    if values = 0 or count <= 0 or count > MBTCP_MAX_COIL_WRITE_QTY then return MBTCP_COMM_ERROR
+
     dim fb_values(0 to count-1) as ubyte
-    for i as long = 0 to count-1
+    dim i as long
+    for i = 0 to count-1
         fb_values(i) = values[i]
     next
+
     return MBTCP_WriteMultipleCoils(fb_values(), start_coil)
 end function
 
@@ -137,15 +171,20 @@ end function
 function mbtcp_report_server_id_c cdecl alias "mbtcp_report_server_id" (byval out_id as zstring ptr, byval max_len as long) as long
     dim fb_id as string
     dim rc as long = MBTCP_ReportServerID(fb_id)
-    if rc = 0 and out_id <> 0 then
+    if rc = 0 and out_id <> 0 and max_len > 0 then
         '' Manual string copy helper
         dim length as long = len(fb_id)
         if length >= max_len then length = max_len - 1
         if length < 0 then length = 0
-        for i as long = 0 to length - 1
+        dim i as long
+        for i = 0 to length - 1
             out_id[i] = fb_id[i]
         next
         out_id[length] = 0
+    else
+        if out_id <> 0 and max_len > 0 then
+            out_id[0] = 0
+        end if
     end if
     return rc
 end function
@@ -158,10 +197,13 @@ function mbtcp_read_write_multiple_registers_c cdecl alias "mbtcp_read_write_mul
     byval write_qty as long, _
     byval out_read_values as ushort ptr ) as long
 
-    if write_values = 0 or write_qty <= 0 or out_read_values = 0 then return MBTCP_COMM_ERROR
+    if write_values = 0 or write_qty <= 0 or write_qty > 121 then return MBTCP_COMM_ERROR
+    if read_qty <= 0 or read_qty > 125 then return MBTCP_COMM_ERROR
+    if out_read_values = 0 then return MBTCP_COMM_ERROR
 
     dim fb_write_values(0 to write_qty-1) as ushort
-    for i as long = 0 to write_qty-1
+    dim i as long
+    for i = 0 to write_qty-1
         fb_write_values(i) = write_values[i]
     next
 
@@ -169,7 +211,7 @@ function mbtcp_read_write_multiple_registers_c cdecl alias "mbtcp_read_write_mul
     dim rc as long = MBTCP_ReadWriteMultipleRegisters(read_start, read_qty, write_start, fb_write_values(), fb_read_values())
 
     if rc = 0 then
-        for i as long = 0 to read_qty-1
+        for i = 0 to read_qty-1
             out_read_values[i] = fb_read_values(i)
         next
     end if
@@ -186,39 +228,51 @@ end function
 ' -------------------------------------------------------------------------
 
 sub mbtcp_set_timeout_c cdecl alias "mbtcp_set_timeout" (byval ms as long)
-    MBP_RecvTimeoutMS = ms
+    if ms < 0 then
+        MBTCP_RecvTimeoutMS = 0
+    else
+        MBTCP_RecvTimeoutMS = ms
+    end if
 end sub
 
 function mbtcp_get_timeout_c cdecl alias "mbtcp_get_timeout" () as long
-    return MBP_RecvTimeoutMS
+    return MBTCP_RecvTimeoutMS
 end function
 
 sub mbtcp_set_unit_id_c cdecl alias "mbtcp_set_unit_id" (byval id as long)
-    MBP_UnitID = id
+    if id < 0 then
+        MBTCP_UnitID = 0
+    elseif id > 255 then
+        MBTCP_UnitID = 255
+    else
+        MBTCP_UnitID = id
+    end if
 end sub
 
 function mbtcp_get_unit_id_c cdecl alias "mbtcp_get_unit_id" () as long
-    return MBP_UnitID
+    return MBTCP_UnitID
 end function
 
 sub mbtcp_set_zero_offset_c cdecl alias "mbtcp_set_zero_offset" (byval offset as long)
-    MBP_ZeroOffset = offset
+    MBTCP_ZeroOffset = offset
 end sub
 
 function mbtcp_get_zero_offset_c cdecl alias "mbtcp_get_zero_offset" () as long
-    return MBP_ZeroOffset
+    return MBTCP_ZeroOffset
 end function
 
 sub mbtcp_get_last_error_c cdecl alias "mbtcp_get_last_error" (byval out_err as zstring ptr, byval max_len as long)
-    if out_err <> 0 then
-        dim length as long = len(MBP_Common_LastError)
-        if length >= max_len then length = max_len - 1
-        if length < 0 then length = 0
-        for i as long = 0 to length - 1
-            out_err[i] = MBP_Common_LastError[i]
-        next
-        out_err[length] = 0
-    end if
+    if out_err = 0 or max_len <= 0 then exit sub
+
+    dim len_error as long = len(MBTCP_Common_LastError)
+    if len_error >= max_len then len_error = max_len - 1
+    if len_error < 0 then len_error = 0
+
+    dim i as long
+    for i = 0 to len_error - 1
+        out_err[i] = MBTCP_Common_LastError[i]
+    next
+    out_err[len_error] = 0
 end sub
 
 end extern

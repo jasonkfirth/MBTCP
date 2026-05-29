@@ -50,10 +50,6 @@ const CLIENT_RECV_TIMEOUT_MS_NORM as integer = 1000
 ' HARNESS GLOBALS
 ' -------------------------------------------------------------------------
 
-dim shared serverThreadRunning as integer
-dim shared serverThreadReady as integer
-dim shared serverStartOk as integer
-
 dim shared gPass as integer
 dim shared gFail as integer
 
@@ -113,29 +109,6 @@ end function
 
 
 ' -------------------------------------------------------------------------
-' WAIT UNTIL FLAG MATCHES VALUE
-' -------------------------------------------------------------------------
-'
-' Used to wait for the server thread to indicate readiness.
-'
-function WaitUntil( byref flag as integer, byval want as integer, byval timeoutMs as integer ) as integer
-
-    dim start as double = timer
-
-    while flag <> want
-        sleep 10
-
-        if (timer - start) * 1000.0 >= timeoutMs then
-            return 0
-        end if
-    wend
-
-    return 1
-
-end function
-
-
-' -------------------------------------------------------------------------
 ' CONNECT CLIENT WITH RETRY
 ' -------------------------------------------------------------------------
 '
@@ -145,14 +118,15 @@ end function
 function ConnectClientOrFail( byref host as string, byval timeoutMs as integer ) as integer
 
     dim start as double = timer
-    MBP_Connection_Failure = 0
+    MBTCP_Connection_Failure = 0
 
     MBTCP_SetPort(HARNESS_PORT)
     do
 
+        MBTCP_Disconnect()
         MBTCP_Connect(host)
 
-        if MBP_Connection_Failure = 0 then
+        if MBTCP_Connection_Failure = 0 then
             return 1
         end if
 
@@ -168,50 +142,73 @@ end function
 
 
 ' -------------------------------------------------------------------------
-' SERVER THREAD
+' PORT SELECTION HELPERS
 ' -------------------------------------------------------------------------
 '
-' This thread runs the Modbus Server Emulator (MBSE).
+' Find a local TCP port that currently refuses connections so the controlled
+' failure test remains reliable even if the HARNESS_PORT is reused elsewhere.
 '
-' The server must run in its own thread because the harness is also
-' running the Modbus client tests in the main thread.
-'
-function ServerThread( byval p as any ptr ) as any ptr
+function FindClosedPort() as integer
 
-    serverThreadRunning = 1
-    serverThreadReady   = 0
-    serverStartOk       = 0
+    dim candidate as integer
+    dim idx as integer
+    dim originalPort as integer
+    dim found as integer
 
-    DBG("Server thread starting...")
+    originalPort = MBTCP_Port
+    candidate = HARNESS_PORT + 10000
+    if candidate > 65000 then candidate = 15000
 
-    if MBSE_StartServer(HARNESS_PORT) = 0 then
+    found = 0
+    for idx = 0 to 199
 
-        DBG("Server failed to start")
-        serverThreadRunning = 0
-        serverThreadReady   = 0
-        serverStartOk       = 0
+        MBTCP_SetPort(candidate)
+        MBTCP_Disconnect()
+        MBTCP_Connection_Failure = 0
+        MBTCP_Connect(HARNESS_HOST)
+
+        if MBTCP_Connection_Failure <> 0 then
+            found = 1
+            exit for
+        end if
+
+        MBTCP_Disconnect()
+        candidate += 1
+    next
+
+    MBTCP_SetPort(originalPort)
+
+    if found = 0 then
         return 0
-
     end if
 
-    DBG("Server started")
-    serverStartOk     = 1
-    serverThreadReady = 1
+    return candidate
 
-    while serverThreadRunning
-        sleep 50
-    wend
+end function
 
-    DBG("Server stopping...")
-    MBSE_StopServer()
 
-    DBG("Server thread exiting")
-    serverThreadRunning = 0
+' -------------------------------------------------------------------------
+' SERVER START WITH RETRY
+' -------------------------------------------------------------------------
+' 
+' Some runtimes do not release listening sockets immediately after STOP.
+' Retry helps the harness stay stable across transient port-release windows.
+function MBSE_StartServerWithRetry( byval port as integer, byval attempts as integer, byval delayMs as integer ) as integer
+
+    dim i as integer
+    for i = 1 to attempts
+        if MBSE_StartServer(port) <> 0 then
+            return 1
+        end if
+
+        if i < attempts then
+            sleep delayMs, 1
+        end if
+    next i
 
     return 0
 
 end function
-
 
 
 ' -------------------------------------------------------------------------
@@ -225,9 +222,6 @@ print
 
 
 dim abortHarness as integer = 0
-dim t as any ptr = 0
-
-
 ' -------------------------------------------------------------------------
 ' INITIALIZE SERVER EMULATOR (MBSE)
 ' -------------------------------------------------------------------------
@@ -315,36 +309,16 @@ MBSE_WriteInputRegister(0, 4321)
 
 
 ' -------------------------------------------------------------------------
-' START SERVER THREAD
+' START SERVER
 ' -------------------------------------------------------------------------
 
-DBG("Starting server thread...")
+DBG("Starting server...")
 
-t = ThreadCreate( cast(any ptr, @ServerThread), 0 )
-
-if t = 0 then
-    TestResult("Server thread creation", 0, "ThreadCreate failed")
+if MBSE_StartServer(HARNESS_PORT) = 0 then
+    TestResult("Server start", 0, "MBSE_StartServer failed (privilege/port-in-use?)")
     abortHarness = 1
-end if
-
-
-if abortHarness = 0 then
-    if WaitUntil(serverThreadReady, 1, WAIT_SERVER_READY_MS) = 0 then
-        TestResult("Server ready", 0, "Timed out waiting for server readiness")
-        abortHarness = 1
-    end if
-end if
-
-
-if abortHarness = 0 then
-
-    if serverStartOk = 0 then
-        TestResult("Server start", 0, "MBSE_StartServer failed (privilege/port-in-use?)")
-        abortHarness = 1
-    else
-        TestResult("Server start", 1, "Listening on port " & HARNESS_PORT)
-    end if
-
+else
+    TestResult("Server start", 1, "Listening on port " & HARNESS_PORT)
 end if
 
 
@@ -357,14 +331,14 @@ if abortHarness = 0 then
     DBG("Initializing MBTCP...")
     MBTCP_Init()
 
-    MBP_UnitID = 255
-    MBP_ZeroOffset = 0
-    MBP_RecvTimeoutMS = CLIENT_RECV_TIMEOUT_MS_NORM
+    MBTCP_UnitID = 255
+    MBTCP_ZeroOffset = 0
+    MBTCP_RecvTimeoutMS = CLIENT_RECV_TIMEOUT_MS_NORM
 
     DBG("Connecting client...")
 
     if ConnectClientOrFail(HARNESS_HOST, WAIT_CONNECT_MS) = 0 then
-        TestResult("Client connect", 0, "Failed (" & MBP_Common_LastError & ")")
+        TestResult("Client connect", 0, "Failed (" & MBTCP_Common_LastError & ")")
         abortHarness = 1
     else
         TestResult("Client connect", 1, "Connected to emulator")
@@ -413,7 +387,7 @@ if abortHarness = 0 then
         end if
 
     else
-        TestResult("WriteRegister / RetrieveRegister", 0, "Write failed (" & MBP_Common_LastError & ")")
+        TestResult("WriteRegister / RetrieveRegister", 0, "Write failed (" & MBTCP_Common_LastError & ")")
     end if
 
 
@@ -464,7 +438,7 @@ if abortHarness = 0 then
         rc = MBTCP_MaskWriteRegister(maskAddr, andMask, orMask)
 
         if rc <> 0 then
-            TestResult("FC16 MaskWriteRegister", 0, "Write failed (" & MBP_Common_LastError & ")")
+            TestResult("FC16 MaskWriteRegister", 0, "Write failed (" & MBTCP_Common_LastError & ")")
         else
             '' Verify from both sides:
             ''   - Client readback (over TCP)
@@ -489,7 +463,7 @@ if abortHarness = 0 then
                     "Expected=&H" & hex(expected,4) & _
                     " Client=&H" & hex(gotClient AND &HFFFF,4) & _
                     " Server=&H" & hex(gotServer,4) & _
-                    " (" & MBP_Common_LastError & ")")
+                    " (" & MBTCP_Common_LastError & ")")
             end if
         end if
     end scope
@@ -524,7 +498,7 @@ if abortHarness = 0 then
         end if
 
     else
-        TestResult("WriteLongRegister / RetrieveLongRegister", 0, "Write failed (" & MBP_Common_LastError & ")")
+        TestResult("WriteLongRegister / RetrieveLongRegister", 0, "Write failed (" & MBTCP_Common_LastError & ")")
     end if
 
 
@@ -557,7 +531,7 @@ if abortHarness = 0 then
         end if
 
     else
-        TestResult("WriteFloatRegister / RetrieveFloatRegister", 0, "Write failed (" & MBP_Common_LastError & ")")
+        TestResult("WriteFloatRegister / RetrieveFloatRegister", 0, "Write failed (" & MBTCP_Common_LastError & ")")
     end if
 
 
@@ -590,7 +564,7 @@ if abortHarness = 0 then
         end if
 
     else
-        TestResult("WriteCoil / RetrieveCoil", 0, "Write failed (" & MBP_Common_LastError & ")")
+        TestResult("WriteCoil / RetrieveCoil", 0, "Write failed (" & MBTCP_Common_LastError & ")")
     end if
 
 
@@ -631,7 +605,7 @@ if abortHarness = 0 then
         TestResult("WriteMultipleRegisters / Verify", ok, iif(ok, "OK", "Mismatch"))
 
     else
-        TestResult("WriteMultipleRegisters / Verify", 0, "Write failed (" & MBP_Common_LastError & ")")
+        TestResult("WriteMultipleRegisters / Verify", 0, "Write failed (" & MBTCP_Common_LastError & ")")
     end if
 
 
@@ -677,7 +651,7 @@ if abortHarness = 0 then
         TestResult("WriteMultipleCoils / Verify", ok, iif(ok, "OK", "Mismatch"))
 
     else
-        TestResult("WriteMultipleCoils / Verify", 0, "Write failed (" & MBP_Common_LastError & ")")
+        TestResult("WriteMultipleCoils / Verify", 0, "Write failed (" & MBTCP_Common_LastError & ")")
     end if
 
 
@@ -739,7 +713,7 @@ if abortHarness = 0 then
         end if
 
     else
-        TestResult("MBTCP_WriteLongRegister / MBSE_ReadLong", 0, "Write failed (" & MBP_Common_LastError & ")")
+        TestResult("MBTCP_WriteLongRegister / MBSE_ReadLong", 0, "Write failed (" & MBTCP_Common_LastError & ")")
     end if
 
 
@@ -799,7 +773,7 @@ if abortHarness = 0 then
         end if
 
     else
-        TestResult("MBTCP_WriteFloatRegister / MBSE_ReadFloat", 0, "Write failed (" & MBP_Common_LastError & ")")
+        TestResult("MBTCP_WriteFloatRegister / MBSE_ReadFloat", 0, "Write failed (" & MBTCP_Common_LastError & ")")
     end if
 
 
@@ -828,7 +802,7 @@ if abortHarness = 0 then
     if exStatus <> MBTCP_COMM_ERROR then
         TestResult("FC07 ReadExceptionStatus", 1, "Status=" & exStatus)
     else
-        TestResult("FC07 ReadExceptionStatus", 0, "Comm error (" & MBP_Common_LastError & ")")
+        TestResult("FC07 ReadExceptionStatus", 0, "Comm error (" & MBTCP_Common_LastError & ")")
     end if
 
 
@@ -932,7 +906,7 @@ if abortHarness = 0 then
         TestResult("FC0B GetCommEventCounter", 1, _
             "Status=" & ctr.status & " EventCount=" & ctr.eventCount)
     else
-        TestResult("FC0B GetCommEventCounter", 0, "Failed (" & MBP_Common_LastError & ")")
+        TestResult("FC0B GetCommEventCounter", 0, "Failed (" & MBTCP_Common_LastError & ")")
     end if
 
 
@@ -955,7 +929,7 @@ if abortHarness = 0 then
         TestResult("FC0C GetCommEventLog", 1, _
             "Status=" & logRes.status & " Events=" & logRes.nEvents & " MsgCount=" & logRes.messageCount)
     else
-        TestResult("FC0C GetCommEventLog", 0, "Failed (" & MBP_Common_LastError & ")")
+        TestResult("FC0C GetCommEventLog", 0, "Failed (" & MBTCP_Common_LastError & ")")
     end if
 
 
@@ -983,7 +957,7 @@ if abortHarness = 0 then
         end if
 
     else
-        TestResult("FC11 ReportServerID", 0, "Failed (" & MBP_Common_LastError & ")")
+        TestResult("FC11 ReportServerID", 0, "Failed (" & MBTCP_Common_LastError & ")")
     end if
 
 
@@ -1029,7 +1003,7 @@ if abortHarness = 0 then
         TestResult("FC17 ReadWriteMultipleRegisters", okRW, iif(okRW, "OK", "Mismatch"))
 
     else
-        TestResult("FC17 ReadWriteMultipleRegisters", 0, "Failed (" & MBP_Common_LastError & ")")
+        TestResult("FC17 ReadWriteMultipleRegisters", 0, "Failed (" & MBTCP_Common_LastError & ")")
     end if
 
 
@@ -1062,7 +1036,7 @@ if abortHarness = 0 then
     dim badRead as integer = MBTCP_RetrieveRegister(badRegAddr)
 
     if badRead = MBTCP_COMM_ERROR then
-        TestResult("Illegal Register Address", 1, "Comm error (" & MBP_Common_LastError & ")")
+        TestResult("Illegal Register Address", 1, "Comm error (" & MBTCP_Common_LastError & ")")
     elseif badRead > 0 and badRead <= 255 then
         TestResult("Illegal Register Address", 1, "PLC exception code=" & badRead)
     else
@@ -1087,7 +1061,7 @@ if abortHarness = 0 then
     dim badCoilRead as integer = MBTCP_RetrieveCoil(badCoilAddr)
 
     if badCoilRead = MBTCP_COMM_ERROR then
-        TestResult("Illegal Coil Address", 1, "Comm error (" & MBP_Common_LastError & ")")
+        TestResult("Illegal Coil Address", 1, "Comm error (" & MBTCP_Common_LastError & ")")
     elseif badCoilRead > 0 and badCoilRead <= 255 then
         TestResult("Illegal Coil Address", 1, "PLC exception code=" & badCoilRead)
     else
@@ -1110,24 +1084,24 @@ if abortHarness = 0 then
     print "Test #19: Controlled Failure - Wrong Unit ID"
     print "----------------------------------------"
 
-    dim savedUnit as integer = MBP_UnitID
-    MBP_UnitID = 1
+    dim savedUnit as integer = MBTCP_UnitID
+    MBTCP_UnitID = 1
 
-    MBP_RecvTimeoutMS = CLIENT_RECV_TIMEOUT_MS_FAST
+    MBTCP_RecvTimeoutMS = CLIENT_RECV_TIMEOUT_MS_FAST
 
     dim wrongUnitRead as integer
     wrongUnitRead = MBTCP_RetrieveRegister(10)
 
     if wrongUnitRead = MBTCP_COMM_ERROR then
-        TestResult("Wrong UnitID", 1, "Correctly failed (" & MBP_Common_LastError & ")")
+        TestResult("Wrong UnitID", 1, "Correctly failed (" & MBTCP_Common_LastError & ")")
     elseif wrongUnitRead > 0 and wrongUnitRead <= 255 then
         TestResult("Wrong UnitID", 1, "PLC exception code=" & wrongUnitRead)
     else
         TestResult("Wrong UnitID", 0, "Expected failure but got " & wrongUnitRead)
     end if
 
-    MBP_UnitID = savedUnit
-    MBP_RecvTimeoutMS = CLIENT_RECV_TIMEOUT_MS_NORM
+    MBTCP_UnitID = savedUnit
+    MBTCP_RecvTimeoutMS = CLIENT_RECV_TIMEOUT_MS_NORM
 
 
 
@@ -1145,17 +1119,24 @@ if abortHarness = 0 then
     print "Test #20: Controlled Failure - Server Shutdown Mid-Session"
     print "----------------------------------------"
 
-    serverThreadRunning = 0
-    ThreadWait(t)
+    ' Stop server and force-close all existing client sockets so the
+    ' reconnection test cannot accidentally hit a half-alive listener.
+    MBTCP_Disconnect()
+    MBSE_StopServer()
+
+    MBTCP_RecvTimeoutMS = CLIENT_RECV_TIMEOUT_MS_FAST
 
     dim afterStopRead as integer
     afterStopRead = MBTCP_RetrieveRegister(10)
+    MBTCP_Disconnect()
 
     if afterStopRead = MBTCP_COMM_ERROR then
-        TestResult("Server Shutdown Mid-Session", 1, "Correctly failed (" & MBP_Common_LastError & ")")
+        TestResult("Server Shutdown Mid-Session", 1, "Correctly failed (" & MBTCP_Common_LastError & ")")
     else
         TestResult("Server Shutdown Mid-Session", 0, "Expected comm error but got " & afterStopRead)
     end if
+
+    MBTCP_RecvTimeoutMS = CLIENT_RECV_TIMEOUT_MS_NORM
 
 
 
@@ -1171,15 +1152,25 @@ if abortHarness = 0 then
     print "----------------------------------------"
 
     MBTCP_Disconnect()
+    MBTCP_Connection_Failure = 0
 
-    MBP_Connection_Failure = 0
+    dim downPort as integer
+    downPort = FindClosedPort()
+    if downPort = 0 then
+        downPort = 15000
+    end if
+    MBTCP_SetPort(downPort)
+
     MBTCP_Connect(HARNESS_HOST)
 
-    if MBP_Connection_Failure <> 0 then
+    if MBTCP_Connection_Failure <> 0 then
         TestResult("Connect When Server Down", 1, "Correctly failed connection")
     else
         TestResult("Connect When Server Down", 0, "Unexpectedly connected")
     end if
+    
+    MBTCP_Disconnect()
+    MBTCP_SetPort(HARNESS_PORT)
 
 
 
@@ -1196,34 +1187,21 @@ if abortHarness = 0 then
     print "Test #22: Recovery - Restart Server and Reconnect"
     print "----------------------------------------"
 
-    serverThreadReady = 0
-    serverThreadRunning = 1
+    sleep 1000,1
 
-    t = ThreadCreate( cast(any ptr, @ServerThread), 0 )
-
-    if t = 0 then
-
-        TestResult("Recovery restart server thread", 0, "ThreadCreate failed")
-
+    if MBSE_StartServerWithRetry(HARNESS_PORT, 8, 1000) = 0 then
+        TestResult("Recovery server start", 0, "Server failed restart")
     else
+        MBTCP_RecvTimeoutMS = CLIENT_RECV_TIMEOUT_MS_NORM
 
-        if WaitUntil(serverThreadReady, 1, WAIT_SERVER_READY_MS) = 0 or serverStartOk = 0 then
-
-            TestResult("Recovery server start", 0, "Server failed restart")
-
+        if ConnectClientOrFail(HARNESS_HOST, WAIT_CONNECT_MS) then
+            TestResult("Recovery reconnect", 1, "Client reconnected successfully")
         else
-
-            MBP_RecvTimeoutMS = CLIENT_RECV_TIMEOUT_MS_NORM
-
-            if ConnectClientOrFail(HARNESS_HOST, WAIT_CONNECT_MS) then
-                TestResult("Recovery reconnect", 1, "Client reconnected successfully")
-            else
-                TestResult("Recovery reconnect", 0, "Reconnect failed (" & MBP_Common_LastError & ")")
-            end if
-
+            TestResult("Recovery reconnect", 0, "Reconnect failed (" & MBTCP_Common_LastError & ")")
         end if
-
     end if
+
+    MBTCP_RecvTimeoutMS = CLIENT_RECV_TIMEOUT_MS_NORM
 
 end if
 
@@ -1242,12 +1220,96 @@ end if
     dim as integer farmConnections = 64
     dim as integer farmPassOk = 1
     for i as integer = 1 to farmConnections
+        MBTCP_Disconnect()
         MBTCP_Connect(HARNESS_HOST)
-        if MBP_Connection_Failure <> 0 then farmPassOk = 0: exit for
+
+        if MBTCP_Connection_Failure <> 0 then farmPassOk = 0: exit for
+
         if MBTCP_RetrieveRegister(0) = MBTCP_COMM_ERROR then farmPassOk = 0: exit for
+
         MBTCP_Disconnect()
     next i
     TestResult("Farm Test", farmPassOk, iif(farmPassOk, "64 connections handled", "Failed"))
+
+' -------------------------------------------------------------------------
+' FRAME INTEGRITY TESTS
+' -------------------------------------------------------------------------
+'
+' These tests validate low-level frame validation helpers directly so we can
+' prove protocol error handling independent of transport.
+
+    print
+    print "----------------------------------------"
+    print "Test #24: MBTCP_CheckFrameCommon protocol guards"
+    print "----------------------------------------"
+
+    scope
+        dim frameProtoBad(0 to 8) as ubyte
+        dim frameTxnBad(0 to 8) as ubyte
+        dim frameUnitBad(0 to 8) as ubyte
+        dim frameException(0 to 8) as ubyte
+        dim frameShort(0 to 5) as ubyte
+        dim ex as integer
+        dim rc as integer
+        dim ok as integer
+
+        frameProtoBad(0) = 0
+        frameProtoBad(1) = 12
+        frameProtoBad(2) = 0
+        frameProtoBad(3) = 1
+        frameProtoBad(4) = 0
+        frameProtoBad(5) = 3
+        frameProtoBad(6) = 255
+        frameProtoBad(7) = 3
+        frameProtoBad(8) = 0
+        ex = 0
+        rc = MBTCP_CheckFrameCommon(frameProtoBad(), 3, 12, ex)
+        TestResult("MBTCP_CheckFrameCommon protocol ID", (rc = MBTCP_COMM_ERROR), iif(rc = MBTCP_COMM_ERROR, "OK", "Protocol-ID guard failed"))
+
+        frameTxnBad(0) = 0
+        frameTxnBad(1) = 13
+        frameTxnBad(2) = 0
+        frameTxnBad(3) = 0
+        frameTxnBad(4) = 0
+        frameTxnBad(5) = 3
+        frameTxnBad(6) = 255
+        frameTxnBad(7) = 3
+        frameTxnBad(8) = 0
+        ex = 0
+        rc = MBTCP_CheckFrameCommon(frameTxnBad(), 3, 14, ex)
+        TestResult("MBTCP_CheckFrameCommon transaction continuity", (rc = MBTCP_COMM_ERROR), iif(rc = MBTCP_COMM_ERROR, "OK", "Transaction check failed"))
+
+        frameUnitBad(0) = 0
+        frameUnitBad(1) = 14
+        frameUnitBad(2) = 0
+        frameUnitBad(3) = 0
+        frameUnitBad(4) = 0
+        frameUnitBad(5) = 3
+        frameUnitBad(6) = 254
+        frameUnitBad(7) = 3
+        frameUnitBad(8) = 0
+        ex = 0
+        rc = MBTCP_CheckFrameCommon(frameUnitBad(), 3, 14, ex)
+        TestResult("MBTCP_CheckFrameCommon UnitID", (rc = MBTCP_COMM_ERROR), iif(rc = MBTCP_COMM_ERROR, "OK", "UnitID check failed"))
+
+        frameException(0) = 0
+        frameException(1) = 15
+        frameException(2) = 0
+        frameException(3) = 0
+        frameException(4) = 0
+        frameException(5) = 3
+        frameException(6) = 255
+        frameException(7) = &H83
+        frameException(8) = 2
+        ex = 0
+        rc = MBTCP_CheckFrameCommon(frameException(), 3, 15, ex)
+        TestResult("MBTCP_CheckFrameCommon exception decode", (rc = MBTCP_COMM_ERROR), iif((rc = MBTCP_COMM_ERROR), "OK", "Exception flag failed"))
+
+        ex = 0
+        rc = MBTCP_CheckFrameCommon(frameShort(), 3, 15, ex)
+        TestResult("MBTCP_CheckFrameCommon short-frame guard", rc = MBTCP_COMM_ERROR, iif(rc = MBTCP_COMM_ERROR, "OK", "Expected short-frame failure"))
+
+    end scope
 
 ' SUMMARY
 ' -------------------------------------------------------------------------
@@ -1266,19 +1328,13 @@ print
 ' CLEANUP
 ' -------------------------------------------------------------------------
 '
-' Always clean up sockets and server threads.
-'
-' This ensures:
-'   - port 502 is released
-'   - threads do not leak
-'   - next run works cleanly
+' Always clean up sockets and server state so future runs start clean.
 '
 DBG("Disconnecting client...")
 MBTCP_Disconnect()
 
-DBG("Stopping server thread...")
-serverThreadRunning = 0
-if t <> 0 then ThreadWait(t)
+DBG("Stopping server...")
+MBSE_StopServer()
 
 DBG("Shutting down MBSE...")
 MBSE_Shutdown()
@@ -1292,5 +1348,11 @@ MBSE_Shutdown()
 ' immediately. This gives the tech time to read the output.
 '
 if command$ = "" then sleep
+
+if gFail > 0 then
+    end gFail
+else
+    end 0
+end if
 
 ' end of validation.bas

@@ -22,7 +22,7 @@ It is intended to emulate a minimal PLC (Programmable Logic Controller) so that 
 The library supports:
 - Multi-client operation (thread-per-connection model)
 - A large pre-allocated memory model:
-  - 99999 addresses per Modbus memory region
+  - 65,535 addresses per Modbus memory region (0 to 65535)
 
 This library is designed for:
 - Testing
@@ -99,7 +99,7 @@ To use the MBTCP Server Emulator, the library must be initialized before use and
     MBSE_Init()
     MBSE_Shutdown()
 
-- MBSE_Init() prepares the library (Winsock, mutexes, internal structures)
+- MBSE_Init() prepares the library (threading primitives, memory tables, socket resources)
 - MBSE_Shutdown() cleans up all resources
 
 ---
@@ -178,10 +178,10 @@ The emulator pre-allocates memory for all Modbus data regions:
 
 Internal arrays:
 
-    MBSE_Coil(0 to 99999)             as ubyte
-    MBSE_DiscreteInput(0 to 99999)    as ubyte
-    MBSE_InputRegister(0 to 99999)    as ushort
-    MBSE_HoldingRegister(0 to 99999)  as ushort
+    MBSE_Coil(0 to 65535)             as ubyte
+    MBSE_DiscreteInput(0 to 65535)    as ubyte
+    MBSE_InputRegister(0 to 65535)    as ushort
+    MBSE_HoldingRegister(0 to 65535)  as ushort
 
 Key rules:
 
@@ -254,14 +254,14 @@ In real usage, a Modbus client (SCADA/HMI) connects and reads values:
 
 - Client reads via FC03:
 
-    → receives 1234
+    MBSE_RetrieveHoldingRegister(0) returns 1234
 
 This mirrors real PLC behavior.
 
 For full validation, see the integration harness which demonstrates:
-- Server write → client read
-- Client write → server memory update
-- End-to-end Modbus correctness :contentReference[oaicite:0]{index=0}
+- Server writes are visible to client reads
+- Client writes update server memory
+- End-to-end Modbus correctness with normal response/error behavior
 
 ## 5.0 Commands
 
@@ -272,7 +272,7 @@ For full validation, see the integration harness which demonstrates:
 #### Introduction
 Initializes the Modbus TCP server emulator library.
 
-On Windows, this initializes Winsock. It also creates internal mutex objects used for thread-safe access to memory tables.
+It also creates internal mutex objects used for thread-safe access to memory tables.
 
 This must be called before starting the server.
 
@@ -658,7 +658,7 @@ Discrete inputs represent single-bit input values.
 
     sub MBSE_WriteDiscreteInput(byval addr as integer, byval value as ubyte)
 
-- addr: 0 to 99999
+- addr: 0 to 65535
 - value: 0 or 1
 
 ---
@@ -1294,7 +1294,7 @@ Controls whether Unit ID must match.
 
 Defines the Unit ID accepted when strict mode is enabled.
 
-- Range: 0–255
+- Range: 0-255
 - Default: typically 255
 
 ---
@@ -1398,10 +1398,10 @@ All Modbus memory access is internally protected by mutex locks.
 
 Common failure cases:
 
-- Port already in use → server fails to start
-- Firewall blocking → clients cannot connect
-- Wrong Unit ID (strict mode) → client receives no response
-- Address out of range → Modbus exception code 2
+- Port already in use: server fails to start
+- Firewall blocking: clients cannot connect
+- Wrong Unit ID (strict mode): client receives no response
+- Address out of range: Modbus exception code 2
 
 ---
 

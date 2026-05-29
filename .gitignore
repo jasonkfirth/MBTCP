@@ -1,3 +1,15 @@
+# Compiled FreeBASIC test binaries
 pulldata
 TestPLC
 validation
+
+# FreeBASIC/build artifacts
+*.o
+*.obj
+*.exe
+*.asm
+*.a
+*.lib
+
+# C build artifacts
+validation_c
